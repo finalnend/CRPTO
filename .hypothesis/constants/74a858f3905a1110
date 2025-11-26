@@ -1,0 +1,4 @@
+# file: C:\Users\user\Desktop\CRPTO\app\ui\pages\paper_trading_page.py
+# hypothesis_version: 6.148.2
+
+[300, 400, 800, '$0.00', '--', '.', '0', 'Balance:', 'Current Price:', 'Paper Trading', 'Place Order', 'Portfolio Positions', 'Trade History']

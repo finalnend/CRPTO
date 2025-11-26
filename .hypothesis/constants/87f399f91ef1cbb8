@@ -1,0 +1,4 @@
+# file: C:\Users\user\Desktop\CRPTO\app\data\providers.py
+# hypothesis_version: 6.148.2
+
+[0.0, 5.0, 100, ',', '-', '/', '/api/v3/ticker/24hr', 'BNBUSDT', 'BTCUSDT', 'ETHUSDT', 'USD', 'USDT', 'ask', 'askPrice', 'bid', 'bidPrice', 'binance', 'binancecoin', 'bitcoin', 'coinbase', 'coingecko', 'ethereum', 'high', 'highPrice', 'ids', 'include_24hr_change', 'include_24hr_vol', 'last', 'lastPrice', 'low', 'lowPrice', 'open', 'prevClosePrice', 'price', 'priceChangePercent', 'quoteVolume', 'symbol', 'true', 'usd', 'usd_24h_change', 'usd_24h_vol', 'volume', 'vs_currencies']

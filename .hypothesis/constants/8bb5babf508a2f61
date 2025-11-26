@@ -1,0 +1,4 @@
+# file: C:\Users\user\Desktop\CRPTO\app\ui\pages\settings.py
+# hypothesis_version: 6.148.2
+
+['#0A84FF', '24h %', '24h High', '24h Low', '24h Vol', 'Accent Color:', 'AppSettings', 'Appearance', 'Ask', 'Auto (WS→REST)', 'Behavior', 'Bid', 'Binance REST', 'Binance WebSocket', 'Choose Accent Color', 'Choose...', 'CoinGecko REST', 'Coinbase REST', 'Column Visibility', 'Dark', 'Data Source', 'Deselect All', 'Last', 'Light', 'Select All', 'Settings', 'Source:', 'Theme:', 'Time', 'Turnover', 'accent_color', 'app_settings', 'auto', 'binance', 'binance-ws', 'coinbase', 'coingecko', 'color: #888;', 'dark', 'data_source', 'light', 'minimize_to_tray', 'theme_mode', 'visible_columns']

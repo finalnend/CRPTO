@@ -268,6 +268,16 @@ def build_stylesheet(mode: str, accent: QColor, text_col: QColor | None = None) 
     QMainWindow {{ background-color: {bg}; }}
     QToolBar {{ background: {panel}; border: 0px; spacing: 8px; }}
     QLineEdit, QComboBox {{ color: {text}; background: {panel}; border: 1px solid #3a3a3a; padding: 6px; border-radius: 6px; }}
+    QComboBox::drop-down {{ border: none; width: 20px; }}
+    QComboBox::down-arrow {{ image: none; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 6px solid {text}; margin-right: 5px; }}
+    QComboBox QAbstractItemView {{ background: {panel}; color: {text}; border: 1px solid #3a3a3a; selection-background-color: {sel}; selection-color: white; outline: none; }}
+    QComboBox QAbstractItemView::item {{ padding: 6px 10px; min-height: 24px; background: {panel}; color: {text}; }}
+    QComboBox QAbstractItemView::item:hover {{ background: {hover_bg}; color: {text}; }}
+    QComboBox QAbstractItemView::item:selected {{ background: {sel}; color: white; }}
+    QListView {{ background: {panel}; color: {text}; border: 1px solid #3a3a3a; outline: none; }}
+    QListView::item {{ padding: 6px 10px; min-height: 24px; background: {panel}; color: {text}; }}
+    QListView::item:hover {{ background: {hover_bg}; }}
+    QListView::item:selected {{ background: {sel}; color: white; }}
     QPushButton {{ 
         color: {text}; 
         background: {panel}; 
@@ -283,7 +293,6 @@ def build_stylesheet(mode: str, accent: QColor, text_col: QColor | None = None) 
         background: {sel}; 
         color: white; 
     }}
-    QComboBox QAbstractItemView {{ background: {panel}; color: {text}; selection-background-color: {sel}; selection-color: white; }}
     QCheckBox {{ color: {text}; }}
     QCheckBox:hover {{ color: {sel}; }}
     QLabel {{ color: {text}; }}

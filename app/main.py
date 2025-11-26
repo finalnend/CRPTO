@@ -164,6 +164,15 @@ from app.storage.storage import JsonFileStorage
 from app.ui.acrylic import AcrylicPanel
 # Animation imports
 from app.ui.animations import PulseAnimator, AnimatedTableItem
+
+# Navigation imports
+from app.ui.navigation import PageType, NavigationSidebar
+from app.ui.page_container import PageContainer
+from app.ui.pages.market_overview import MarketOverviewPage
+from app.ui.pages.paper_trading_page import PaperTradingFullPage
+from app.ui.pages.chart_analysis import ChartAnalysisPage
+from app.ui.pages.settings import SettingsPage
+
 from decimal import Decimal
 from pathlib import Path
 import logging
@@ -174,7 +183,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Crypto Ticker - PySide6")
-        self.resize(720, 420)
+        self.resize(1200, 700)
         # State
         self.symbols: List[str] = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
         self.rest_source: str = "binance"  # for manual or failover
@@ -186,200 +195,197 @@ class MainWindow(QMainWindow):
         self.alerts: Dict[str, Dict[str, float | bool | None]] = {}
         self._rest_failures = 0
         self._sparks: Dict[str, 'SparklineWidget'] = {}
-        # UI
-        self._build_toolbar_min()
-        self._build_table()
-        self._build_sidebar()
-        self._build_chart()
         self.theme_mode = "dark"
         self.accent_color = QColor("#0A84FF")
-        self._apply_theme(self.theme_mode)
-        self._build_tray()
-        # Backend
+        
+        # Price history for charts
+        self.price_history: Dict[str, deque[tuple[float, float]]] = {}
+        
+        # Backend setup first (needed for pages)
         self._provider = BinanceRestProvider(timeout_s=7)
         self._worker = FetcherWorker(self._provider)
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self._thread.start()
+        
         # WS client (on UI thread for simplicity)
         self._ws = BinanceWsClient()
         self._ws.tick.connect(self._apply_updates)
         self._ws.error.connect(self._on_ws_error)
         self._ws.connectedChanged.connect(self._on_ws_connected)
+        
         # Kline WS (single active symbol)
         self._kws = BinanceKlineWsClient()
         self._kws.kline.connect(self._on_kline)
         self._kws.error.connect(self._on_ws_error)
+        
         # Wire signals
         self.requestFetch.connect(self._worker.fetch)
         self._worker.resultReady.connect(self._on_result)
         self._worker.error.connect(self._on_error)
+        
+        # Paper trading setup (before UI so pages can use it)
+        self._setup_paper_trading()
+        
+        # UI - New navigation-based layout
+        self._build_navigation_ui()
+        self._build_tray()
+        
+        # Apply theme
+        self._apply_theme(self.theme_mode)
+        
         # Timer for periodic updates
         self._busy = False
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
+        
         # Start WS in auto mode
         self._ws.start(self.symbols)
-        # Start kline for first selection if candle mode chosen later
-        # Initial render rows
-        self._sync_table_rows()
         
-        # Paper trading setup
-        self._setup_paper_trading()
+        # Initialize pages with data
+        self._init_page_data()
     # ----- UI Build -----
+    def _build_navigation_ui(self) -> None:
+        """Build the new navigation-based UI layout.
+        
+        Implements Requirements 1.1: Navigation sidebar on left edge
+        with PageContainer as central widget.
+        """
+        # Create main container widget
+        main_widget = QWidget()
+        main_layout = QHBoxLayout(main_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # Create navigation sidebar (Requirements 1.1)
+        self._nav_sidebar = NavigationSidebar()
+        main_layout.addWidget(self._nav_sidebar)
+        
+        # Create page container
+        self._page_container = PageContainer()
+        main_layout.addWidget(self._page_container, 1)
+        
+        # Create and register pages
+        self._create_pages()
+        self._register_pages()
+        
+        # Wire up navigation signals (Requirements 1.3, 1.4, 1.5)
+        self._nav_sidebar.pageSelected.connect(self._page_container.switch_to)
+        self._page_container.pageChanged.connect(self._nav_sidebar.set_current_page)
+        
+        # Set default page to MarketOverview
+        self._nav_sidebar.set_current_page(PageType.MARKET_OVERVIEW)
+        self._page_container.switch_to(PageType.MARKET_OVERVIEW, animate=False)
+        
+        self.setCentralWidget(main_widget)
+    
+    def _create_pages(self) -> None:
+        """Create all page widgets."""
+        # Market Overview Page (Requirements 2.1, 2.2, 2.3)
+        self._market_page = MarketOverviewPage()
+        self._market_page.symbolSelected.connect(self._on_market_symbol_selected)
+        
+        # Paper Trading Page (Requirements 3.1, 3.2, 3.3, 3.4)
+        self._trading_page = PaperTradingFullPage(
+            self._portfolio,
+            self._order_service,
+            self._data_provider,
+        )
+        
+        # Chart Analysis Page (Requirements 4.1, 4.2, 4.3, 4.4)
+        self._chart_page = ChartAnalysisPage()
+        self._chart_page.symbolChanged.connect(self._on_chart_symbol_changed)
+        
+        # Settings Page (Requirements 5.1, 5.2, 5.3, 5.4, 5.5)
+        self._settings_page = SettingsPage(storage=self._storage)
+        self._settings_page.dataSourceChanged.connect(self._on_data_source_changed)
+        self._settings_page.themeChanged.connect(self._on_settings_theme_changed)
+        self._settings_page.accentColorChanged.connect(self._on_settings_accent_changed)
+        self._settings_page.columnVisibilityChanged.connect(self._on_column_visibility_changed)
+        self._settings_page.settingChanged.connect(self._on_setting_changed)
+    
+    def _register_pages(self) -> None:
+        """Register all pages with the page container."""
+        self._page_container.add_page(PageType.MARKET_OVERVIEW, self._market_page)
+        self._page_container.add_page(PageType.PAPER_TRADING, self._trading_page)
+        self._page_container.add_page(PageType.CHART_ANALYSIS, self._chart_page)
+        self._page_container.add_page(PageType.SETTINGS, self._settings_page)
+    
+    def _init_page_data(self) -> None:
+        """Initialize pages with current data."""
+        # Set symbols for market overview and chart pages
+        self._market_page.set_symbols(self.symbols)
+        self._chart_page.set_symbols(self.symbols)
+        
+        # Set accent color
+        self._market_page.set_accent_color(self.accent_color)
+        self._chart_page.set_accent_color(self.accent_color)
+    
+    def _on_market_symbol_selected(self, symbol: str) -> None:
+        """Handle symbol selection from market overview page."""
+        # Update trading page with selected symbol
+        self._trading_page.set_symbol(symbol)
+        # Update chart page with selected symbol
+        self._chart_page.set_symbol(symbol)
+        # Start kline stream for chart
+        self._ensure_kline(symbol)
+    
+    def _on_chart_symbol_changed(self, symbol: str) -> None:
+        """Handle symbol change from chart analysis page."""
+        self._ensure_kline(symbol)
+    
+    def _on_data_source_changed(self, source: str) -> None:
+        """Handle data source change from settings page."""
+        self.mode = source
+        if self.mode == "binance-ws":
+            self._ws.start(self.symbols)
+        elif self.mode == "auto":
+            self._ws.start(self.symbols)
+            self.rest_source = "binance"
+        else:
+            self.rest_source = self.mode
+            self.statusBar().showMessage(f"REST source: {self.rest_source}", 3000)
+    
+    def _on_settings_theme_changed(self, theme_mode: str) -> None:
+        """Handle theme change from settings page."""
+        self._apply_theme(theme_mode)
+    
+    def _on_settings_accent_changed(self, color: QColor) -> None:
+        """Handle accent color change from settings page."""
+        self.accent_color = color
+        self._apply_theme(self.theme_mode)
+        # Update page accent colors
+        self._market_page.set_accent_color(color)
+        self._chart_page.set_accent_color(color)
+    
+    def _on_column_visibility_changed(self, column_name: str, visible: bool) -> None:
+        """Handle column visibility change from settings page."""
+        # Column indices: Last=1, Bid=2, Ask=3, 24h%=4, High=5, Low=6, Vol=7, Turnover=8, Time=9
+        col_map = {
+            "Last": 1, "Bid": 2, "Ask": 3, "24h %": 4,
+            "24h High": 5, "24h Low": 6, "24h Vol": 7, "Turnover": 8, "Time": 9
+        }
+        col_idx = col_map.get(column_name)
+        if col_idx is not None:
+            # Update market overview page table visibility
+            self._market_page._table.setColumnHidden(col_idx, not visible)
+    
+    def _on_setting_changed(self, key: str, value) -> None:
+        """Handle generic setting change from settings page."""
+        if key == "minimize_to_tray":
+            self._minimize_to_tray = value
+    
     def _build_toolbar_min(self) -> None:
         # Keep toolbar minimal; main controls live in the sidebar.
         tb = QToolBar("Toolbar", self)
         tb.setMovable(False)
         self.addToolBar(Qt.TopToolBarArea, tb)
-    def _build_sidebar(self) -> None:
-        dock = QDockWidget("Controls", self)
-        dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
-        scroll = QScrollArea(dock)
-        scroll.setWidgetResizable(True)
-        # Use AcrylicPanel for frosted glass effect
-        panel = AcrylicPanel(blur_radius=20, tint_opacity=0.85)
-        v = panel.layout()
-        v.setContentsMargins(10, 10, 10, 10)
-        v.setSpacing(10)
-        # Store reference for theme updates
-        self._sidebar_acrylic_panel = panel
-        # Symbols
-        g_symbols = QGroupBox("Symbols")
-        vs = QVBoxLayout(g_symbols)
-        self.input = QLineEdit(self)
-        self.input.setPlaceholderText("Add symbol e.g. BTCUSDT or BTC/USDT")
-        self.input.returnPressed.connect(self._add_symbol_from_input)
-        vs.addWidget(self.input)
-        hb = QHBoxLayout()
-        btn_add = QPushButton("Add", self)
-        btn_add.clicked.connect(self._add_symbol_from_input)
-        btn_rm = QPushButton("Remove Selected", self)
-        btn_rm.clicked.connect(self._remove_selected)
-        hb.addWidget(btn_add)
-        hb.addWidget(btn_rm)
-        vs.addLayout(hb)
-        v.addWidget(g_symbols)
-        # Data source
-        g_src = QGroupBox("Data Source")
-        ls = QVBoxLayout(g_src)
-        self.source_combo = QComboBox(self)
-        self.source_combo.addItems([
-            "Auto (WS→REST)",
-            "Binance WS",
-            "Binance REST",
-            "CoinGecko REST",
-            "Coinbase REST",
-        ])
-        self.source_combo.currentIndexChanged.connect(self._on_source_changed)
-        ls.addWidget(self.source_combo)
-        v.addWidget(g_src)
-        # Chart
-        g_chart = QGroupBox("Chart")
-        lc = QVBoxLayout(g_chart)
-        self.chart_mode_combo = QComboBox(self)
-        self.chart_mode_combo.addItems(["Line", "Candle (1m)"])
-        self.chart_mode_combo.currentIndexChanged.connect(self._on_chart_mode)
-        lc.addWidget(self.chart_mode_combo)
-        self.act_percent_axis = QCheckBox("Percent Axis", self)
-        self.act_percent_axis.toggled.connect(self._on_percent_axis)
-        lc.addWidget(self.act_percent_axis)
-        btn_reset = QPushButton("Reset Zoom", self)
-        btn_reset.clicked.connect(self._reset_zoom)
-        lc.addWidget(btn_reset)
-        v.addWidget(g_chart)
-        # Columns
-        g_cols = QGroupBox("Columns")
-        lcols = QVBoxLayout(g_cols)
-        self._col_actions = {}
-        for name in ["Last", "Bid", "Ask", "24h %", "24h High", "24h Low", "24h Vol", "Turnover", "Time"]:
-            cb = QCheckBox(name, self)
-            cb.setChecked(True)
-            cb.toggled.connect(self._toggle_column_visibility)
-            lcols.addWidget(cb)
-            self._col_actions[name] = cb
-        v.addWidget(g_cols)
-        # Appearance
-        g_app = QGroupBox("Appearance")
-        la = QVBoxLayout(g_app)
-        self.appearance_combo = QComboBox(self)
-        self.appearance_combo.addItems(["Dark", "Light"])
-        self.appearance_combo.currentIndexChanged.connect(self._on_theme_changed)
-        la.addWidget(self.appearance_combo)
-        btn_accent = QPushButton("Accent…", self)
-        btn_accent.clicked.connect(self._choose_accent)
-        la.addWidget(btn_accent)
-        self.act_tray_on_close = QCheckBox("Minimize to tray on close", self)
-        self.act_tray_on_close.setChecked(True)
-        self.act_tray_on_close.toggled.connect(lambda v: setattr(self, "_minimize_to_tray", v))
-        la.addWidget(self.act_tray_on_close)
-        v.addWidget(g_app)
-        v.addStretch(1)
-        scroll.setWidget(panel)
-        dock.setWidget(scroll)
-        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
-        self.sidebar_dock = dock
-    def _build_table(self) -> None:
-        self.table = QTableWidget(self)
-        self.table.setColumnCount(10)
-        self.table.setHorizontalHeaderLabels(["Symbol", "Last", "Bid", "Ask", "24h %", "24h High", "24h Low", "24h Vol", "Turnover", "Time"])
-        self.table.verticalHeader().setVisible(False)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setAlternatingRowColors(True)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.setSortingEnabled(True)
-        try:
-            self.table.verticalHeader().setDefaultSectionSize(34)
-        except Exception:
-            pass
-        # Context menu for alerts
-        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self._on_table_menu)
-        self.setCentralWidget(self.table)
-        self.table.itemSelectionChanged.connect(self._on_selection_changed)
+
     # ----- Helpers -----
     def _normalize_symbol(self, s: str) -> str:
         return s.replace("/", "").replace("-", "").replace(" ", "").upper()
-    def _sync_table_rows(self) -> None:
-        self.table.setRowCount(len(self.symbols))
-        for row, sym in enumerate(self.symbols):
-            self.table.setItem(row, 0, QTableWidgetItem(sym))
-            for col in range(1, 9):
-                self.table.setItem(row, col, NumericItem("-", 0.0))
-            self.table.setItem(row, 9, QTableWidgetItem("-"))
-            # sparkline widget
-            sp = SparklineWidget(color=self.accent_color, left_padding=64)
-            self.table.setCellWidget(row, 0, sp)
-            self._sparks[sym] = sp
-    def _row_for_symbol(self, sym: str) -> int:
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)
-            if item and item.text().upper() == sym.upper():
-                return row
-        return -1
-    def _add_symbol_from_input(self) -> None:
-        raw = self.input.text().strip()
-        if not raw:
-            return
-        sym = self._normalize_symbol(raw)
-        if sym in self.symbols:
-            self.input.clear()
-            return
-        self.symbols.append(sym)
-        self._sync_table_rows()
-        self._ws.set_symbols(self.symbols)
-        self.input.clear()
-    def _remove_selected(self) -> None:
-        rows = {idx.row() for idx in self.table.selectionModel().selectedRows()}
-        if not rows:
-            return
-        syms = [self.table.item(r, 0).text() for r in rows]
-        self.symbols = [s for s in self.symbols if s not in syms]
-        self._sync_table_rows()
-        self._ws.set_symbols(self.symbols)
     def _tick(self) -> None:
         # Poll only in REST modes; in auto only when WS not connected
         should_poll = (self.mode in ("binance", "coingecko", "coinbase")) or (
@@ -391,49 +397,35 @@ class MainWindow(QMainWindow):
             self._busy = True
             self.requestFetch.emit(self.rest_source, self.symbols)
     def _apply_updates(self, packed: dict) -> None:
+        # Update market overview page with price data (Requirements 2.4)
+        if hasattr(self, '_market_page'):
+            self._market_page.set_price_data(packed)
+        
+        # Update chart analysis page with price points
         for sym, d in packed.items():
-            row = self._row_for_symbol(sym)
-            if row < 0:
-                continue
             last = float(d.get("last", 0.0))
-            chg = float(d.get("change_pct", 0.0))
-            bid = float(d.get("bid", 0.0))
-            ask = float(d.get("ask", 0.0))
-            high = float(d.get("high", 0.0))
-            low = float(d.get("low", 0.0))
-            vol = float(d.get("volume", 0.0))
-            qvol = float(d.get("quote_volume", 0.0))
-            ts = datetime.fromisoformat(d["ts"]).strftime("%H:%M:%S") if isinstance(d.get("ts"), str) else datetime.now().strftime("%H:%M:%S")
-            # Update numeric items (for sorting)
-            self._set_numeric(row, 1, self._fmt_price(last), last)
-            self._set_numeric(row, 2, self._fmt_price(bid), bid)
-            self._set_numeric(row, 3, self._fmt_price(ask), ask)
-            self._set_numeric(row, 4, f"{chg:.2f}%", chg)
-            self._set_numeric(row, 5, self._fmt_price(high), high)
-            self._set_numeric(row, 6, self._fmt_price(low), low)
-            self._set_numeric(row, 7, self._fmt_volume(vol), vol)
-            self._set_numeric(row, 8, self._fmt_volume(qvol), qvol)
-            self.table.item(row, 9).setText(ts)
-            # Change color
-            color = Qt.green if chg >= 0 else Qt.red
-            self.table.item(row, 1).setForeground(color)
-            self.table.item(row, 4).setForeground(color)
-            # Alerts
-            self._check_alerts(sym, last)
-            # History & chart
+            
+            # Push to price history
             self._push_price(sym, last)
-            self._update_chart_if_selected(sym)
-            # Sparkline update
-            sp = self._sparks.get(sym)
-            if sp:
-                # Use last ~50 points of price history
-                hist = list(self.price_history.get(sym, []))[-50:]
-                sp.update_data([v for _, v in hist], color=self.accent_color)
+            
+            # Update chart analysis page
+            if hasattr(self, '_chart_page'):
+                now_ms = datetime.now().timestamp() * 1000
+                self._chart_page.add_price_point(sym, now_ms, last)
+            
+            # Check alerts
+            self._check_alerts(sym, last)
+            
+            # Update paper trading page price (Requirements 3.4)
+            if hasattr(self, '_trading_page'):
+                self._trading_page.update_price(sym, Decimal(str(last)))
     @Slot(dict)
     def _on_result(self, packed: dict) -> None:
         try:
             self._apply_updates(packed)
             self._rest_failures = 0
+        except Exception as e:
+            logger.error(f"Error applying updates: {e}")
         finally:
             self._busy = False
     @Slot(str)
@@ -491,64 +483,7 @@ class MainWindow(QMainWindow):
             v /= 1000.0
             i += 1
         return f"{v:.2f}{units[i]}"
-    def _set_numeric(self, row: int, col: int, text: str, value: float) -> None:
-        item = self.table.item(row, col)
-        if not isinstance(item, NumericItem):
-            item = NumericItem(text, value)
-            self.table.setItem(row, col, item)
-        else:
-            # Animate value change with flash effect (Requirement 2.1)
-            old_value = item.value
-            item.setText(text)
-            item.value = value
-            
-            # Flash background on price change
-            if old_value != value and col in (1, 2, 3):  # Last, Bid, Ask columns
-                flash_color = QColor(0, 200, 0, 80) if value > old_value else QColor(200, 0, 0, 80)
-                self._flash_cell(item, flash_color)
-    
-    def _flash_cell(self, item: QTableWidgetItem, color: QColor, duration_ms: int = 200) -> None:
-        """Flash a table cell background color briefly (Requirement 2.1)."""
-        original_bg = item.background()
-        item.setBackground(color)
-        
-        # Use timer to reset background
-        timer = QTimer(self)
-        timer.setSingleShot(True)
-        timer.timeout.connect(lambda: item.setBackground(original_bg))
-        timer.start(duration_ms)
-        
-        # Store timer reference to prevent garbage collection
-        if not hasattr(self, '_flash_timers'):
-            self._flash_timers = []
-        self._flash_timers.append(timer)
-        # Clean up old timers
-        self._flash_timers = [t for t in self._flash_timers if t.isActive()]
-    
     # ----- Alerts -----
-    def _on_table_menu(self, pos) -> None:
-        index = self.table.indexAt(pos)
-        if not index.isValid():
-            return
-        row = index.row()
-        sym = self.table.item(row, 0).text()
-        m = QMenu(self)
-        act_up = m.addAction("Set Upper Alert…")
-        act_dn = m.addAction("Set Lower Alert…")
-        m.addSeparator()
-        act_clr = m.addAction("Clear Alerts")
-        chosen = m.exec(self.table.viewport().mapToGlobal(pos))
-        if chosen == act_up:
-            val, ok = QInputDialog.getDouble(self, "Upper Alert", f"Price >= (for {sym})", 0.0, 0.0, 1e12, 6)
-            if ok:
-                self._set_alert(sym, upper=val)
-        elif chosen == act_dn:
-            val, ok = QInputDialog.getDouble(self, "Lower Alert", f"Price <= (for {sym})", 0.0, 0.0, 1e12, 6)
-            if ok:
-                self._set_alert(sym, lower=val)
-        elif chosen == act_clr:
-            self.alerts.pop(sym, None)
-            self.statusBar().showMessage(f"Cleared alerts for {sym}", 3000)
     def _set_alert(self, sym: str, upper: float | None = None, lower: float | None = None) -> None:
         a = self.alerts.get(sym, {"upper": None, "lower": None, "armed_upper": True, "armed_lower": True})
         if upper is not None:
@@ -578,100 +513,9 @@ class MainWindow(QMainWindow):
             self._pulse_alert_row(sym)
     
     def _pulse_alert_row(self, sym: str, pulse_count: int = 3) -> None:
-        """Create pulsing animation for alert row (Requirement 3.4)."""
-        row = self._row_for_symbol(sym)
-        if row < 0:
-            return
-        
-        # Initialize pulse animator if needed
-        if not hasattr(self, '_alert_pulse_animator'):
-            self._alert_pulse_animator = PulseAnimator(self)
-            self._alert_pulse_animator.pulseValue.connect(self._on_pulse_value)
-            self._pulse_row = -1
-            self._pulse_count = 0
-            self._max_pulse_count = 0
-        
-        self._pulse_row = row
-        self._pulse_count = 0
-        self._max_pulse_count = pulse_count * 2  # Each pulse has 2 phases
-        self._alert_pulse_animator.start_pulsing(min_value=0.3, max_value=1.0, duration_ms=400)
-        
-        # Stop after specified pulses
-        QTimer.singleShot(pulse_count * 800, self._stop_pulse)
-    
-    def _on_pulse_value(self, value: float) -> None:
-        """Handle pulse animation value change."""
-        if self._pulse_row < 0:
-            return
-        
-        # Apply pulse effect to row background
-        alpha = int(value * 255)
-        pulse_color = QColor(255, 200, 0, alpha)  # Yellow/orange pulse
-        
-        for col in range(self.table.columnCount()):
-            item = self.table.item(self._pulse_row, col)
-            if item:
-                item.setBackground(pulse_color)
-    
-    def _stop_pulse(self) -> None:
-        """Stop the pulse animation and reset row colors."""
-        if hasattr(self, '_alert_pulse_animator'):
-            self._alert_pulse_animator.stop_pulsing()
-        
-        if self._pulse_row >= 0:
-            # Reset row background
-            for col in range(self.table.columnCount()):
-                item = self.table.item(self._pulse_row, col)
-                if item:
-                    item.setBackground(QColor(0, 0, 0, 0))  # Transparent
-            self._pulse_row = -1
-    
-    # ----- Columns & Source -----
-    def _toggle_column_visibility(self) -> None:
-        names = ["Last", "Bid", "Ask", "24h %", "24h High", "24h Low", "24h Vol", "Turnover", "Time"]
-        for i, n in enumerate(names, start=1):
-            act = self._col_actions[n]
-            self.table.setColumnHidden(i, not act.isChecked())
-    def _on_source_changed(self) -> None:
-        idx = self.source_combo.currentIndex()
-        opts = ["auto", "binance-ws", "binance", "coingecko", "coinbase"]
-        self.mode = opts[idx]
-        if self.mode == "binance-ws":
-            self._ws.start(self.symbols)
-        elif self.mode == "auto":
-            self._ws.start(self.symbols)
-            self.rest_source = "binance"
-        else:
-            # REST modes
-            self.rest_source = self.mode
-            self.statusBar().showMessage(f"REST source: {self.rest_source}", 3000)
-    def _on_chart_mode(self) -> None:
-        mode = self.chart_mode_combo.currentIndex()
-        is_candle = mode == 1
-        self.candle_series.setVisible(is_candle)
-        self.series_main.setVisible(not is_candle)
-        self.series_ma_fast.setVisible(not is_candle)
-        self.series_ma_slow.setVisible(not is_candle)
-        self.area_fill.setVisible(not is_candle)
-        self.act_percent_axis.setEnabled(not is_candle)
-        rows = self.table.selectionModel().selectedRows()
-        sym = self.table.item(rows[0].row(), 0).text() if rows else self.symbols[0]
-        if is_candle:
-            self._ensure_kline(sym)
-        self._update_chart(sym)
-    def _on_percent_axis(self) -> None:
-        rows = self.table.selectionModel().selectedRows()
-        if rows:
-            sym = self.table.item(rows[0].row(), 0).text()
-        else:
-            sym = self.symbols[0]
-        self._update_chart(sym)
-    def _reset_zoom(self) -> None:
-        self.chart.zoomReset()
-        self.vol_chart.zoomReset()
-        rows = self.table.selectionModel().selectedRows()
-        sym = self.table.item(rows[0].row(), 0).text() if rows else self.symbols[0]
-        self._update_chart(sym)
+        """Create pulsing animation for alert (simplified for new UI)."""
+        # Alert notification is now handled via tray notification
+        pass
     # ----- Tray & Theme -----
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(self)
@@ -694,77 +538,8 @@ class MainWindow(QMainWindow):
                 self.showNormal()
             else:
                 self.hide()
-    # ----- Chart -----
-    def _build_chart(self) -> None:
-        # History: symbol -> deque of (ms, price)
-        self.price_history: Dict[str, deque[tuple[float, float]]] = {}
-        self.chart = QChart()
-        self.chart.setBackgroundVisible(False)
-        self.chart.legend().hide()
-        # Series
-        self.series_main = QLineSeries()
-        self.series_ma_fast = QLineSeries()
-        self.series_ma_slow = QLineSeries()
-        self.series_base = QLineSeries()  # for area fill baseline
-        self.area_fill = QAreaSeries(self.series_main, self.series_base)
-        self.area_fill.setOpacity(0.25)
-        # Candles
-        self.candle_series = QCandlestickSeries()
-        self.candle_series.setIncreasingColor(QColor('#00C853'))
-        self.candle_series.setDecreasingColor(QColor('#FF5252'))
-        # Axes
-        self.axisX = QDateTimeAxis()
-        self.axisX.setFormat("HH:mm:ss")
-        self.axisX.setTickCount(6)
-        self.axisY = QValueAxis()
-        self.axisY.setLabelFormat("%.2f")
-        # Add series in order (fill under main, then main and MAs)
-        for s in (self.area_fill, self.series_main, self.series_ma_fast, self.series_ma_slow, self.candle_series):
-            self.chart.addSeries(s)
-        self.chart.addAxis(self.axisX, Qt.AlignBottom)
-        self.chart.addAxis(self.axisY, Qt.AlignLeft)
-        for s in (self.area_fill, self.series_main, self.series_ma_fast, self.series_ma_slow, self.candle_series):
-            s.attachAxis(self.axisX)
-            s.attachAxis(self.axisY)
-        # Toggle visibility initially (line mode default)
-        self.candle_series.setVisible(False)
-        # View with crosshair
-        view = ChartViewCrosshair(self.chart)
-        view.setRenderHint(QPainter.Antialiasing)
-        view.setSeries(self.series_main)
-        view.setRubberBand(QChartView.RectangleRubberBand)
-        dock = QDockWidget("Chart", self)
-        dock.setWidget(view)
-        dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
-        self.addDockWidget(Qt.RightDockWidgetArea, dock)
-        self.chart_view = view
-        self.chart_dock = dock
-        # Volume sub chart (bars)
-        self.vol_chart = QChart()
-        self.vol_chart.setBackgroundVisible(False)
-        self.vol_chart.legend().hide()
-        self.vol_series = QBarSeries()
-        self.vol_set = QBarSet("")
-        self.vol_series.append(self.vol_set)
-        self.vol_axisX = QBarCategoryAxis()
-        self.vol_axisY = QValueAxis()
-        self.vol_axisY.setLabelFormat("%.0f")
-        self.vol_chart.addSeries(self.vol_series)
-        self.vol_chart.addAxis(self.vol_axisX, Qt.AlignBottom)
-        self.vol_chart.addAxis(self.vol_axisY, Qt.AlignLeft)
-        self.vol_series.attachAxis(self.vol_axisX)
-        self.vol_series.attachAxis(self.vol_axisY)
-        vol_view = QChartView(self.vol_chart)
-        vol_view.setRenderHint(QPainter.Antialiasing)
-        vol_dock = QDockWidget("Volume", self)
-        vol_dock.setWidget(vol_view)
-        vol_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
-        self.addDockWidget(Qt.RightDockWidgetArea, vol_dock)
-        self.vol_view = vol_view
-        self.vol_dock = vol_dock
-
     def _setup_paper_trading(self) -> None:
-        """Set up paper trading components and dock widget."""
+        """Set up paper trading components (used by PaperTradingFullPage)."""
         # Initialize storage service
         storage_path = Path.home() / ".crypto_ticker" / "data"
         self._storage = JsonFileStorage(storage_path)
@@ -781,9 +556,6 @@ class MainWindow(QMainWindow):
         
         # Initialize order service
         self._order_service = OrderService(self._portfolio, self._data_provider)
-        
-        # Build paper trading dock
-        self._build_paper_trading_dock()
     
     def _load_portfolio(self) -> PortfolioManager:
         """Load portfolio from storage or create new one.
@@ -819,17 +591,12 @@ class MainWindow(QMainWindow):
             if price > 0:
                 self._data_provider.update_price(sym, price)
         
-        # Refresh paper trading panel if it exists
-        if hasattr(self, "_paper_trading_content"):
-            self._paper_trading_content.refresh()
+        # Refresh paper trading page if it exists
+        if hasattr(self, "_trading_page"):
+            self._trading_page.refresh()
     
     def _on_ws_connected_for_paper_trading(self, connected: bool) -> None:
-        """Update data provider connection status.
-        
-        Handles Requirements 7.3 and 7.4:
-        - When connection is lost: pause order execution and display warning
-        - When connection is restored: resume normal operations
-        """
+        """Update data provider connection status."""
         self._data_provider.set_connected(connected)
         
         # Show status bar message for connection state changes
@@ -838,53 +605,10 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage("Paper Trading: Data connection lost - Orders disabled", 8000)
         
-        # Update paper trading panel connection status
-        if hasattr(self, "_paper_trading_content"):
-            self._paper_trading_content.refresh()
+        # Update paper trading page connection status
+        if hasattr(self, "_trading_page"):
+            self._trading_page.refresh()
     
-    def _build_paper_trading_dock(self) -> None:
-        """Build the paper trading dock widget."""
-        # Create acrylic panel container for frosted glass effect
-        self._paper_trading_acrylic_panel = AcrylicPanel(blur_radius=20, tint_opacity=0.85)
-        
-        # Create paper trading content widget
-        self._paper_trading_content = PaperTradingDockContent(
-            self._portfolio,
-            self._order_service,
-            self._data_provider,
-        )
-        
-        # Add content to acrylic panel
-        self._paper_trading_acrylic_panel.layout().addWidget(self._paper_trading_content)
-        
-        # Create scroll area for the content
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self._paper_trading_acrylic_panel)
-        
-        # Create dock widget
-        dock = QDockWidget("Paper Trading", self)
-        dock.setWidget(scroll)
-        dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
-        
-        # Add to right dock area (alongside chart)
-        self.addDockWidget(Qt.RightDockWidgetArea, dock)
-        
-        # Store reference
-        self.paper_trading_dock = dock
-        
-        # Apply initial theme to acrylic panel
-        self._paper_trading_acrylic_panel.apply_theme(self.theme_mode, self.accent_color)
-        
-        # Connect table selection to paper trading symbol
-        self.table.itemSelectionChanged.connect(self._on_selection_for_paper_trading)
-    
-    def _on_selection_for_paper_trading(self) -> None:
-        """Update paper trading panel when table selection changes."""
-        rows = self.table.selectionModel().selectedRows()
-        if rows:
-            sym = self.table.item(rows[0].row(), 0).text()
-            self._paper_trading_content.set_symbol(sym)
     def _push_price(self, sym: str, price: float, max_points: int = 600) -> None:
         dq = self.price_history.get(sym)
         if dq is None:
@@ -892,86 +616,6 @@ class MainWindow(QMainWindow):
             self.price_history[sym] = dq
         ms = int(datetime.now().timestamp() * 1000)
         dq.append((ms, price))
-    def _on_selection_changed(self) -> None:
-        rows = self.table.selectionModel().selectedRows()
-        if not rows:
-            return
-        sym = self.table.item(rows[0].row(), 0).text()
-        if self.chart_mode_combo.currentIndex() == 1:  # Candle
-            self._ensure_kline(sym)
-        self._update_chart(sym)
-    def _update_chart_if_selected(self, sym: str) -> None:
-        rows = self.table.selectionModel().selectedRows()
-        if rows and self.table.item(rows[0].row(), 0).text() == sym:
-            self._update_chart(sym)
-    def _update_chart(self, sym: str) -> None:
-        if self.chart_mode_combo.currentIndex() == 1:
-            # Candle mode
-            self._update_candle_chart(sym)
-            return
-        data = list(self.price_history.get(sym, []))
-        if not data:
-            self.series_main.clear(); self.series_ma_fast.clear(); self.series_ma_slow.clear(); self.series_base.clear()
-            return
-        xs = [x for x, _ in data]
-        ys = [y for _, y in data]
-        # Percent axis support
-        if self.act_percent_axis.isChecked():
-            base = ys[0]
-            ys_disp = [((y / base) - 1.0) * 100.0 for y in ys]
-            label = lambda v: f"{v:.2f}%"
-        else:
-            ys_disp = ys
-            label = self._fmt_price
-        pts = [QPointF(x, y) for x, y in zip(xs, ys_disp)]
-        self.series_main.replace(pts)
-        # Axis ranges
-        x0, x1 = xs[0], xs[-1]
-        lo, hi = min(ys_disp), max(ys_disp)
-        pad = (hi - lo) * 0.05 if hi != lo else (hi or 1) * 0.01
-        self.axisX.setRange(QDateTime.fromMSecsSinceEpoch(int(x0)), QDateTime.fromMSecsSinceEpoch(int(x1)))
-        self.axisY.setRange(lo - pad, hi + pad)
-        # Label format
-        if self.act_percent_axis.isChecked():
-            self.axisY.setLabelFormat("%.2f%")
-        else:
-            ref = ys[-1]
-            if ref >= 100:
-                self.axisY.setLabelFormat("%.2f")
-            elif ref >= 1:
-                self.axisY.setLabelFormat("%.4f")
-            else:
-                self.axisY.setLabelFormat("%.8f")
-        # Area baseline at current low
-        base_pts = [QPointF(x, lo - pad) for x in xs]
-        self.series_base.replace(base_pts)
-        # Moving averages
-        def sma(values: List[float], window: int) -> List[float]:
-            out: List[float] = []
-            s = 0.0
-            q: deque[float] = deque()
-            for v in values:
-                s += v; q.append(v)
-                if len(q) > window:
-                    s -= q.popleft()
-                out.append(s / len(q))
-            return out
-        fast = 20
-        slow = 60
-        ma_f = sma(ys_disp, fast)
-        ma_s = sma(ys_disp, slow)
-        self.series_ma_fast.replace([QPointF(x, y) for x, y in zip(xs, ma_f)])
-        self.series_ma_slow.replace([QPointF(x, y) for x, y in zip(xs, ma_s)])
-        # Last price/percent label near last point
-        last_pt = QPointF(xs[-1], ys_disp[-1])
-        pos = self.chart.mapToPosition(last_pt, self.series_main)
-        if not hasattr(self, "_last_label"):
-            self._last_label = QGraphicsSimpleTextItem("")
-            self._last_label.setZValue(1002)
-            self.chart.scene().addItem(self._last_label)
-        self._last_label.setText(label(ys_disp[-1]))
-        self._last_label.setPos(pos.x() + 6, pos.y() - 16)
-        self.chart.setTitle(sym)
     def _ensure_kline(self, sym: str) -> None:
         # Start kline stream for selected symbol
         self._kws.start(sym, "1m")
@@ -979,88 +623,78 @@ class MainWindow(QMainWindow):
             self.ohlc_history: Dict[str, List[dict]] = {}
     @Slot(dict)
     def _on_kline(self, d: dict) -> None:
+        """Handle kline data from WebSocket."""
         sym = d.get("symbol", "")
+        if not hasattr(self, "ohlc_history"):
+            self.ohlc_history: Dict[str, List[dict]] = {}
+        
         arr = self.ohlc_history.get(sym)
         if arr is None:
             arr = []
             self.ohlc_history[sym] = arr
-        # maintain up to 120 candles
+        
+        # Maintain up to 120 candles
         if arr and arr[-1].get("t") == d["t"]:
             arr[-1] = d
         else:
             arr.append(d)
             if len(arr) > 120:
                 del arr[0: len(arr) - 120]
-        self._update_candle_chart(sym)
-    def _update_candle_chart(self, sym: str) -> None:
-        data = self.ohlc_history.get(sym, [])
-        self.candle_series.clear()
-        if not data:
-            return
-        # Build candle sets and volume bars
-        categories = []
-        vols = []
-        for k in data:
-            cs = QCandlestickSet(k["o"], k["h"], k["l"], k["c"], k["t"])  # timestamp as timestamp
-            self.candle_series.append(cs)
-            ts = datetime.fromtimestamp(k["t"] / 1000.0).strftime("%H:%M")
-            categories.append(ts)
-            vols.append(k.get("q", 0.0))
-        # X/Y ranges
-        xs = [k["t"] for k in data]
-        ys = [k["o"] for k in data] + [k["h"] for k in data] + [k["l"] for k in data] + [k["c"] for k in data]
-        lo, hi = min(ys), max(ys)
-        pad = (hi - lo) * 0.05 if hi != lo else (hi or 1) * 0.01
-        self.axisX.setRange(QDateTime.fromMSecsSinceEpoch(int(xs[0])), QDateTime.fromMSecsSinceEpoch(int(xs[-1])))
-        self.axisY.setRange(lo - pad, hi + pad)
-        self.axisY.setLabelFormat("%.2f")
-        # Update bottom volume chart
-        self.vol_series.clear()
-        if vols:
-            self.vol_set = QBarSet("")
-            self.vol_set.append(vols)
-            self.vol_series.append(self.vol_set)
-            self.vol_axisX.clear()
-            self.vol_axisX.append(categories)
-            vhi = max(vols)
-            self.vol_axisY.setRange(0.0, vhi * 1.2)
+        
+        # Update chart analysis page with kline data
+        if hasattr(self, '_chart_page'):
+            kline_data = [
+                {
+                    "timestamp": k["t"],
+                    "open": k["o"],
+                    "high": k["h"],
+                    "low": k["l"],
+                    "close": k["c"],
+                    "volume": k.get("q", 0.0),
+                }
+                for k in arr
+            ]
+            self._chart_page.update_data(kline_data)
     # ----- Theme -----
     def _apply_theme(self, mode: str = "dark") -> None:
         self.theme_mode = mode
         # Build and apply global stylesheet via theme module
         style = theme.build_stylesheet(mode, self.accent_color)
         self.setStyleSheet(style)
-        # Chart theming
-        theme.apply_chart_theme(
-            self.chart,
-            self.chart_view,
-            self.series_main,
-            self.series_ma_fast,
-            self.series_ma_slow,
-            self.area_fill,
-            self.axisX,
-            self.axisY,
-            (self.vol_axisX, self.vol_axisY),
-            mode,
-            self.accent_color,
-        )
-        # Update sparklines with new color
-        for sp in getattr(self, "_sparks", {}).values():
-            sp.update_color(self.accent_color)
         
-        # Apply theme to acrylic panels for proper contrast
-        if hasattr(self, "_sidebar_acrylic_panel"):
-            self._sidebar_acrylic_panel.apply_theme(mode, self.accent_color)
-        if hasattr(self, "_paper_trading_acrylic_panel"):
-            self._paper_trading_acrylic_panel.apply_theme(mode, self.accent_color)
-    def _on_theme_changed(self) -> None:
-        idx = self.appearance_combo.currentIndex()
-        self._apply_theme("dark" if idx == 0 else "light")
-    def _choose_accent(self) -> None:
-        col = QColorDialog.getColor(self.accent_color, self, "Choose Accent Color")
-        if col.isValid():
-            self.accent_color = col
-            self._apply_theme(self.theme_mode)
+        # Update page accent colors
+        if hasattr(self, '_market_page'):
+            self._market_page.set_accent_color(self.accent_color)
+        if hasattr(self, '_chart_page'):
+            self._chart_page.set_accent_color(self.accent_color)
+    # ----- Responsive Layout -----
+    # Breakpoint for responsive sidebar (Requirements 7.1, 7.2)
+    RESPONSIVE_BREAKPOINT = 800
+    
+    def resizeEvent(self, event) -> None:
+        """Handle window resize for responsive layout.
+        
+        Implements Requirements 7.1, 7.2, 7.3, 7.4:
+        - Below 800px: Collapse sidebar to icon-only mode
+        - 800px or above: Sidebar may expand to show labels
+        - Notify pages of width changes for responsive adjustments
+        """
+        super().resizeEvent(event)
+        
+        new_width = event.size().width()
+        
+        # Toggle sidebar collapsed state based on window width
+        if hasattr(self, '_nav_sidebar'):
+            should_collapse = new_width < self.RESPONSIVE_BREAKPOINT
+            self._nav_sidebar.set_collapsed(should_collapse)
+        
+        # Notify page container of width change for page-level responsive adjustments
+        if hasattr(self, '_page_container'):
+            # Calculate available width for pages (total width minus sidebar)
+            sidebar_width = self._nav_sidebar.get_width() if hasattr(self, '_nav_sidebar') else 60
+            page_width = new_width - sidebar_width
+            self._page_container.notify_width_changed(page_width)
+    
     # ----- Lifecycle -----
     def closeEvent(self, event):  # type: ignore[override]
         if self._minimize_to_tray and QSystemTrayIcon.isSystemTrayAvailable():

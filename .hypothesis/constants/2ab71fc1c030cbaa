@@ -1,0 +1,4 @@
+# file: C:\Users\user\Desktop\CRPTO\app\ui\widgets\toast_notification.py
+# hypothesis_version: 6.148.2
+
+[b'opacity', 0.0, 1.0, 200, 320, 4000, '#0A84FF', '#1a2a4a', '#1a472a', '#30D158', '#4a1a1a', '#FF453A', 'bg', 'border', 'error', 'icon', 'info', 'success', 'ℹ', '✓', '✕']

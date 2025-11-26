@@ -1,0 +1,4 @@
+# file: C:\Users\user\Desktop\CRPTO\app\ui\pages\market_overview.py
+# hypothesis_version: 6.148.2
+
+[0.0, 0.1, 1.0, 1000.0, 100, 200, 300, 600, 700, 800, 1000, '#0A84FF', '%H:%M:%S', ',', '-', '-inf', '.', '0', '24h %', '24h High', '24h Low', '24h Vol', 'Ask', 'B', 'Bid', 'HH:mm:ss', 'K', 'Last', 'M', 'Price', 'Price Chart', 'Symbol', 'T', 'Time', 'Turnover', 'ask', 'bid', 'change_pct', 'high', 'inf', 'last', 'low', 'quote_volume', 'ts', 'volume']

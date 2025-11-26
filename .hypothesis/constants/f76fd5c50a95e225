@@ -1,0 +1,4 @@
+# file: C:\Users\user\Desktop\CRPTO\app\storage\__init__.py
+# hypothesis_version: 6.148.2
+
+['IStorageService', 'JsonFileStorage']

@@ -1,0 +1,4 @@
+# file: C:\Users\user\Desktop\CRPTO\app\ui\utils.py
+# hypothesis_version: 6.148.2
+
+['0', 'BUY', 'Quantity too large', 'SELL', 'invalid', 'neutral', 'valid', 'warning']

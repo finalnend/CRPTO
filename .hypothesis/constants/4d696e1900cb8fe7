@@ -1,0 +1,4 @@
+# file: C:\Users\user\Desktop\CRPTO\app\ui\pages\chart_analysis.py
+# hypothesis_version: 6.148.2
+
+[0.0, 0.1, 1.0, 110, 120, 180, 500, 1000, '#0A84FF', '#2a2a2a', '#30D158', '#E6E6E6', '#FF453A', '-inf', '15m', '1d', '1h', '1m', '4h', '5m', 'Candle', 'HH:mm', 'Line', 'Price', 'Reset Zoom', 'Symbol:', 'Time', 'Timeframe:', 'Type:', 'candle', 'close', 'high', 'inf', 'line', 'low', 'open', 'timestamp']

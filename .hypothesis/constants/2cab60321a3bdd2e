@@ -1,0 +1,4 @@
+# file: C:\Users\user\Desktop\CRPTO\app\trading\portfolio.py
+# hypothesis_version: 6.148.2
+
+['0', '10000', 'BUY', 'PortfolioManager', 'SELL', 'average_cost', 'balance', 'created_at', 'id', 'initial_balance', 'order_type', 'positions', 'price', 'quantity', 'symbol', 'timestamp', 'transactions']

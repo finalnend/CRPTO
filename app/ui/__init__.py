@@ -6,6 +6,8 @@
 #   from app.ui.acrylic import AcrylicWidget, AcrylicPanel
 #   from app.ui.paper_trading import PaperTradingPanel, PortfolioView, TradeHistoryView
 #   from app.ui.animations import FadeAnimator, PulseAnimator, AnimatedTableItem
+#   from app.ui.navigation import PageType, NavigationState, NavigationSidebar
+#   from app.ui.page_container import PageContainer
 
 __all__ = [
     "AcrylicWidget",
@@ -21,6 +23,10 @@ __all__ = [
     "HoverAnimator",
     "PulseAnimator",
     "AnimatedTableItem",
+    "PageType",
+    "NavigationState",
+    "NavigationSidebar",
+    "PageContainer",
 ]
 
 
@@ -47,4 +53,14 @@ def __getattr__(name: str):
             "PulseAnimator": PulseAnimator,
             "AnimatedTableItem": AnimatedTableItem,
         }[name]
+    elif name in ("PageType", "NavigationState", "NavigationSidebar"):
+        from app.ui.navigation import PageType, NavigationState, NavigationSidebar
+        return {
+            "PageType": PageType,
+            "NavigationState": NavigationState,
+            "NavigationSidebar": NavigationSidebar,
+        }[name]
+    elif name == "PageContainer":
+        from app.ui.page_container import PageContainer
+        return PageContainer
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

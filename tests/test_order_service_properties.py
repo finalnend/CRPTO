@@ -67,9 +67,27 @@ symbol_strategy = st.sampled_from(["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "
 
 
 @given(
-    initial_balance=valid_balance_strategy,
-    quantity=positive_quantity_strategy,
-    price=positive_price_strategy,
+    initial_balance=st.decimals(
+        min_value=Decimal("100"),
+        max_value=Decimal("1000"),
+        places=2,
+        allow_nan=False,
+        allow_infinity=False
+    ),
+    quantity=st.decimals(
+        min_value=Decimal("1"),
+        max_value=Decimal("100"),
+        places=2,
+        allow_nan=False,
+        allow_infinity=False
+    ),
+    price=st.decimals(
+        min_value=Decimal("100"),
+        max_value=Decimal("10000"),
+        places=2,
+        allow_nan=False,
+        allow_infinity=False
+    ),
     symbol=symbol_strategy
 )
 @settings(max_examples=100)

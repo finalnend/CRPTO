@@ -51,6 +51,7 @@ class FadeAnimator(QObject):
         end_opacity: float = 1.0,
         duration_ms: int = 200,
         on_finished: Optional[Callable] = None,
+        remove_effect_on_complete: bool = True,
     ) -> QPropertyAnimation:
         """Create a fade animation for a widget.
         
@@ -60,6 +61,7 @@ class FadeAnimator(QObject):
             end_opacity: Ending opacity (0.0-1.0)
             duration_ms: Animation duration in milliseconds
             on_finished: Callback when animation completes
+            remove_effect_on_complete: Remove graphics effect after animation to prevent QPainter errors
             
         Returns:
             The animation object (caller should keep reference)
@@ -77,8 +79,14 @@ class FadeAnimator(QObject):
         anim.setEndValue(end_opacity)
         anim.setEasingCurve(QEasingCurve.InOutQuad)
         
-        if on_finished:
-            anim.finished.connect(on_finished)
+        def cleanup():
+            if remove_effect_on_complete and end_opacity >= 1.0:
+                # Remove effect when fully visible to prevent QPainter errors
+                widget.setGraphicsEffect(None)
+            if on_finished:
+                on_finished()
+        
+        anim.finished.connect(cleanup)
         
         anim.start()
         return anim
