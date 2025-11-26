@@ -9,6 +9,6 @@ if not exist .venv (
 call .venv\Scripts\activate
 python -m pip install --upgrade pip >nul 2>&1
 pip install -r requirements.txt
-python app\main.py
+python -m app.main
 
 endlocal

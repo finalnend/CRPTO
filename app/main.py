@@ -153,6 +153,22 @@ from app.data.providers import BinanceRestProvider
 from app.ws.binance import BinanceWsClient, BinanceKlineWsClient
 from app.util.env import fix_ssl_env
 import app.theme as theme
+
+# Paper trading imports
+from app.trading.portfolio import PortfolioManager, PortfolioSerializer
+from app.trading.orders import OrderService, BinanceDataProviderAdapter
+from app.ui.paper_trading import PaperTradingDockContent
+from app.storage.storage import JsonFileStorage
+
+# Acrylic effect imports
+from app.ui.acrylic import AcrylicPanel
+# Animation imports
+from app.ui.animations import PulseAnimator, AnimatedTableItem
+from decimal import Decimal
+from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
 class MainWindow(QMainWindow):
     requestFetch = Signal(str, list)
     def __init__(self) -> None:
@@ -209,6 +225,9 @@ class MainWindow(QMainWindow):
         # Start kline for first selection if candle mode chosen later
         # Initial render rows
         self._sync_table_rows()
+        
+        # Paper trading setup
+        self._setup_paper_trading()
     # ----- UI Build -----
     def _build_toolbar_min(self) -> None:
         # Keep toolbar minimal; main controls live in the sidebar.
@@ -220,10 +239,13 @@ class MainWindow(QMainWindow):
         dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
         scroll = QScrollArea(dock)
         scroll.setWidgetResizable(True)
-        panel = QWidget()
-        v = QVBoxLayout(panel)
+        # Use AcrylicPanel for frosted glass effect
+        panel = AcrylicPanel(blur_radius=20, tint_opacity=0.85)
+        v = panel.layout()
         v.setContentsMargins(10, 10, 10, 10)
         v.setSpacing(10)
+        # Store reference for theme updates
+        self._sidebar_acrylic_panel = panel
         # Symbols
         g_symbols = QGroupBox("Symbols")
         vs = QVBoxLayout(g_symbols)
@@ -475,8 +497,34 @@ class MainWindow(QMainWindow):
             item = NumericItem(text, value)
             self.table.setItem(row, col, item)
         else:
+            # Animate value change with flash effect (Requirement 2.1)
+            old_value = item.value
             item.setText(text)
             item.value = value
+            
+            # Flash background on price change
+            if old_value != value and col in (1, 2, 3):  # Last, Bid, Ask columns
+                flash_color = QColor(0, 200, 0, 80) if value > old_value else QColor(200, 0, 0, 80)
+                self._flash_cell(item, flash_color)
+    
+    def _flash_cell(self, item: QTableWidgetItem, color: QColor, duration_ms: int = 200) -> None:
+        """Flash a table cell background color briefly (Requirement 2.1)."""
+        original_bg = item.background()
+        item.setBackground(color)
+        
+        # Use timer to reset background
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda: item.setBackground(original_bg))
+        timer.start(duration_ms)
+        
+        # Store timer reference to prevent garbage collection
+        if not hasattr(self, '_flash_timers'):
+            self._flash_timers = []
+        self._flash_timers.append(timer)
+        # Clean up old timers
+        self._flash_timers = [t for t in self._flash_timers if t.isActive()]
+    
     # ----- Alerts -----
     def _on_table_menu(self, pos) -> None:
         index = self.table.indexAt(pos)
@@ -526,6 +574,58 @@ class MainWindow(QMainWindow):
             QApplication.beep()
             if self.tray.isVisible():
                 self.tray.showMessage("Crypto Ticker Alert", hit, QSystemTrayIcon.Information, 8000)
+            # Pulse animation for alert row (Requirement 3.4)
+            self._pulse_alert_row(sym)
+    
+    def _pulse_alert_row(self, sym: str, pulse_count: int = 3) -> None:
+        """Create pulsing animation for alert row (Requirement 3.4)."""
+        row = self._row_for_symbol(sym)
+        if row < 0:
+            return
+        
+        # Initialize pulse animator if needed
+        if not hasattr(self, '_alert_pulse_animator'):
+            self._alert_pulse_animator = PulseAnimator(self)
+            self._alert_pulse_animator.pulseValue.connect(self._on_pulse_value)
+            self._pulse_row = -1
+            self._pulse_count = 0
+            self._max_pulse_count = 0
+        
+        self._pulse_row = row
+        self._pulse_count = 0
+        self._max_pulse_count = pulse_count * 2  # Each pulse has 2 phases
+        self._alert_pulse_animator.start_pulsing(min_value=0.3, max_value=1.0, duration_ms=400)
+        
+        # Stop after specified pulses
+        QTimer.singleShot(pulse_count * 800, self._stop_pulse)
+    
+    def _on_pulse_value(self, value: float) -> None:
+        """Handle pulse animation value change."""
+        if self._pulse_row < 0:
+            return
+        
+        # Apply pulse effect to row background
+        alpha = int(value * 255)
+        pulse_color = QColor(255, 200, 0, alpha)  # Yellow/orange pulse
+        
+        for col in range(self.table.columnCount()):
+            item = self.table.item(self._pulse_row, col)
+            if item:
+                item.setBackground(pulse_color)
+    
+    def _stop_pulse(self) -> None:
+        """Stop the pulse animation and reset row colors."""
+        if hasattr(self, '_alert_pulse_animator'):
+            self._alert_pulse_animator.stop_pulsing()
+        
+        if self._pulse_row >= 0:
+            # Reset row background
+            for col in range(self.table.columnCount()):
+                item = self.table.item(self._pulse_row, col)
+                if item:
+                    item.setBackground(QColor(0, 0, 0, 0))  # Transparent
+            self._pulse_row = -1
+    
     # ----- Columns & Source -----
     def _toggle_column_visibility(self) -> None:
         names = ["Last", "Bid", "Ask", "24h %", "24h High", "24h Low", "24h Vol", "Turnover", "Time"]
@@ -662,6 +762,129 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, vol_dock)
         self.vol_view = vol_view
         self.vol_dock = vol_dock
+
+    def _setup_paper_trading(self) -> None:
+        """Set up paper trading components and dock widget."""
+        # Initialize storage service
+        storage_path = Path.home() / ".crypto_ticker" / "data"
+        self._storage = JsonFileStorage(storage_path)
+        
+        # Initialize data provider adapter
+        self._data_provider = BinanceDataProviderAdapter()
+        
+        # Wire WS client to data provider adapter
+        self._ws.tick.connect(self._on_tick_for_paper_trading)
+        self._ws.connectedChanged.connect(self._on_ws_connected_for_paper_trading)
+        
+        # Load or create portfolio
+        self._portfolio = self._load_portfolio()
+        
+        # Initialize order service
+        self._order_service = OrderService(self._portfolio, self._data_provider)
+        
+        # Build paper trading dock
+        self._build_paper_trading_dock()
+    
+    def _load_portfolio(self) -> PortfolioManager:
+        """Load portfolio from storage or create new one.
+        
+        Returns:
+            PortfolioManager instance (restored or new)
+        """
+        try:
+            data = self._storage.load("portfolio")
+            if data is not None:
+                portfolio = PortfolioSerializer.deserialize(data)
+                logger.info("Portfolio restored from storage")
+                return portfolio
+        except Exception as e:
+            logger.error(f"Failed to load portfolio, creating new: {e}")
+        
+        # Create new portfolio with default balance
+        return PortfolioManager(Decimal("10000"))
+    
+    def _save_portfolio(self) -> None:
+        """Save portfolio state to storage."""
+        try:
+            data = PortfolioSerializer.serialize(self._portfolio)
+            self._storage.save("portfolio", data)
+            logger.info("Portfolio saved to storage")
+        except Exception as e:
+            logger.error(f"Failed to save portfolio: {e}")
+    
+    def _on_tick_for_paper_trading(self, packed: dict) -> None:
+        """Update data provider with tick data for paper trading."""
+        for sym, d in packed.items():
+            price = float(d.get("last", 0.0))
+            if price > 0:
+                self._data_provider.update_price(sym, price)
+        
+        # Refresh paper trading panel if it exists
+        if hasattr(self, "_paper_trading_content"):
+            self._paper_trading_content.refresh()
+    
+    def _on_ws_connected_for_paper_trading(self, connected: bool) -> None:
+        """Update data provider connection status.
+        
+        Handles Requirements 7.3 and 7.4:
+        - When connection is lost: pause order execution and display warning
+        - When connection is restored: resume normal operations
+        """
+        self._data_provider.set_connected(connected)
+        
+        # Show status bar message for connection state changes
+        if connected:
+            self.statusBar().showMessage("Paper Trading: Data connection restored", 5000)
+        else:
+            self.statusBar().showMessage("Paper Trading: Data connection lost - Orders disabled", 8000)
+        
+        # Update paper trading panel connection status
+        if hasattr(self, "_paper_trading_content"):
+            self._paper_trading_content.refresh()
+    
+    def _build_paper_trading_dock(self) -> None:
+        """Build the paper trading dock widget."""
+        # Create acrylic panel container for frosted glass effect
+        self._paper_trading_acrylic_panel = AcrylicPanel(blur_radius=20, tint_opacity=0.85)
+        
+        # Create paper trading content widget
+        self._paper_trading_content = PaperTradingDockContent(
+            self._portfolio,
+            self._order_service,
+            self._data_provider,
+        )
+        
+        # Add content to acrylic panel
+        self._paper_trading_acrylic_panel.layout().addWidget(self._paper_trading_content)
+        
+        # Create scroll area for the content
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._paper_trading_acrylic_panel)
+        
+        # Create dock widget
+        dock = QDockWidget("Paper Trading", self)
+        dock.setWidget(scroll)
+        dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        
+        # Add to right dock area (alongside chart)
+        self.addDockWidget(Qt.RightDockWidgetArea, dock)
+        
+        # Store reference
+        self.paper_trading_dock = dock
+        
+        # Apply initial theme to acrylic panel
+        self._paper_trading_acrylic_panel.apply_theme(self.theme_mode, self.accent_color)
+        
+        # Connect table selection to paper trading symbol
+        self.table.itemSelectionChanged.connect(self._on_selection_for_paper_trading)
+    
+    def _on_selection_for_paper_trading(self) -> None:
+        """Update paper trading panel when table selection changes."""
+        rows = self.table.selectionModel().selectedRows()
+        if rows:
+            sym = self.table.item(rows[0].row(), 0).text()
+            self._paper_trading_content.set_symbol(sym)
     def _push_price(self, sym: str, price: float, max_points: int = 600) -> None:
         dq = self.price_history.get(sym)
         if dq is None:
@@ -824,6 +1047,12 @@ class MainWindow(QMainWindow):
         # Update sparklines with new color
         for sp in getattr(self, "_sparks", {}).values():
             sp.update_color(self.accent_color)
+        
+        # Apply theme to acrylic panels for proper contrast
+        if hasattr(self, "_sidebar_acrylic_panel"):
+            self._sidebar_acrylic_panel.apply_theme(mode, self.accent_color)
+        if hasattr(self, "_paper_trading_acrylic_panel"):
+            self._paper_trading_acrylic_panel.apply_theme(mode, self.accent_color)
     def _on_theme_changed(self) -> None:
         idx = self.appearance_combo.currentIndex()
         self._apply_theme("dark" if idx == 0 else "light")
@@ -841,6 +1070,10 @@ class MainWindow(QMainWindow):
                 self.tray.showMessage("Crypto Ticker", "Still running in system tray", QSystemTrayIcon.Information, 4000)
                 self._tray_first_hide = False
             return
+        
+        # Save portfolio state before closing
+        self._save_portfolio()
+        
         self._timer.stop()
         self._thread.quit()
         self._thread.wait(2000)
@@ -862,7 +1095,8 @@ def main() -> int:
     return app.exec()
 if __name__ == "__main__":
     raise SystemExit(main())
-
+
+
 
 
 
