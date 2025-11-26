@@ -1,4 +1,0 @@
-# file: C:\Users\user\Desktop\CRPTO\app\ui\paper_trading.py
-# hypothesis_version: 6.148.2
-
-['#28A745', '#3a3a3a', '#DC3545', '#FFC107', '$0.00', '%Y-%m-%d %H:%M:%S', '+', '--', '.', '0', '0.00', 'Avg Cost', 'BUY', 'Balance: $0.00', 'CSV Files (*.csv)', 'Connected', 'Current Price:', 'Disconnected', 'Export', 'Export Failed', 'Export Successful', 'Export Trade History', 'Export to CSV', 'Invalid quantity', 'Order Value:', 'Order cancelled', 'P&L', 'Performance Metrics', 'Place Order', 'Portfolio', 'Price', 'Qty', 'Quantity:', 'Realized P&L: $0.00', 'SELL', 'Symbol', 'Symbol:', 'Time', 'Total Trades: 0', 'Total Value: $0.00', 'Trade History', 'Type', 'Value', 'Win Rate: 0%', 'color: #28A745;', 'color: #DC3545;', 'e.g., BTCUSDT', 'font-size: 16px;', 'font-weight: bold;', 'trade_history.csv', '●', '⚠']

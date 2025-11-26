@@ -1,4 +1,0 @@
-# file: C:\Users\user\Desktop\CRPTO\app\trading\orders.py
-# hypothesis_version: 6.148.2
-
-['0', 'executed', 'insufficient_balance', 'invalid_quantity', 'no_price_data', 'pending', 'rejected']

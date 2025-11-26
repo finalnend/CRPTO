@@ -1,4 +1,0 @@
-# file: C:\Users\user\Desktop\CRPTO\app\ui\__init__.py
-# hypothesis_version: 6.148.2
-
-['AcrylicPanel', 'AcrylicWidget', 'AnimatedTableItem', 'FadeAnimator', 'HoverAnimator', 'IAcrylicEffect', 'NavigationSidebar', 'NavigationState', 'PageContainer', 'PageType', 'PaperTradingPanel', 'PortfolioView', 'PulseAnimator', 'TradeHistoryView']

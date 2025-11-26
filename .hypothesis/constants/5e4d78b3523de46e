@@ -1,4 +1,0 @@
-# file: C:\Users\user\Desktop\CRPTO\app\ui\widgets\order_confirmation_dialog.py
-# hypothesis_version: 6.148.2
-
-[0.5, 400, '#30D158', '#FF453A', '.', '0', 'BUY', 'Cancel', 'Confirm Order', 'Price', 'Quantity', 'Symbol', 'Total Value', 'cancelBtn', 'confirmBtn', 'description', 'detailLabel', 'detailValue', 'detailsFrame', 'header', 'orderType', 'totalLabel', 'totalValue']
