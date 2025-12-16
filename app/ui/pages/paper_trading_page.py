@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QLabel,
     QFrame,
+    QPushButton,
+    QMessageBox,
 )
 
 from app.trading.portfolio import IPortfolioManager
@@ -41,6 +43,7 @@ class PaperTradingFullPage(QWidget):
     """
     
     orderSubmitted = Signal(str, str, object, object)  # symbol, order_type, quantity, price
+    resetRequested = Signal()
     
     def __init__(
         self,
@@ -155,8 +158,45 @@ class PaperTradingFullPage(QWidget):
         self._balance_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #0A84FF;")
         header_layout.addWidget(QLabel("Balance:"))
         header_layout.addWidget(self._balance_label)
+
+        header_layout.addSpacing(24)
+
+        # Reset simulation
+        reset_btn = QPushButton("Reset")
+        reset_btn.setStyleSheet(
+            "QPushButton { background-color: #343a40; color: white; padding: 8px 12px; border-radius: 6px; }"
+            "QPushButton:hover { background-color: #495057; }"
+        )
+        reset_btn.clicked.connect(self._on_reset_clicked)
+        header_layout.addWidget(reset_btn)
         
         return header
+
+    def _on_reset_clicked(self) -> None:
+        initial_balance = None
+        getter = getattr(self._portfolio, "get_initial_balance", None)
+        if callable(getter):
+            try:
+                initial_balance = getter()
+            except Exception:
+                initial_balance = None
+
+        detail = "This clears positions and trade history and restores the starting balance."
+        if initial_balance is not None:
+            detail = (
+                "This clears positions and trade history and restores the starting balance to "
+                f"${initial_balance:,.2f}."
+            )
+
+        resp = QMessageBox.question(
+            self,
+            "Reset Paper Trading",
+            "Reset the paper trading simulation?\n\n" + detail,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if resp == QMessageBox.Yes:
+            self.resetRequested.emit()
     
     def _on_order_submitted(self, symbol: str, order_type: str, quantity, price) -> None:
         """Handle order submission from trading panel."""

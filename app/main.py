@@ -246,6 +246,9 @@ class MainWindow(QMainWindow):
         
         # Initialize pages with data
         self._init_page_data()
+
+        # Ensure state is persisted on app quit (e.g., tray "Quit")
+        self._shutdown_started = False
     # ----- UI Build -----
     def _build_navigation_ui(self) -> None:
         """Build the new navigation-based UI layout.
@@ -293,6 +296,7 @@ class MainWindow(QMainWindow):
             self._order_service,
             self._data_provider,
         )
+        self._trading_page.resetRequested.connect(self._on_reset_paper_trading)
         
         # Chart Analysis Page (Requirements 4.1, 4.2, 4.3, 4.4)
         self._chart_page = ChartAnalysisPage()
@@ -347,6 +351,19 @@ class MainWindow(QMainWindow):
         else:
             self.rest_source = self.mode
             self.statusBar().showMessage(f"REST source: {self.rest_source}", 3000)
+
+    def _on_reset_paper_trading(self) -> None:
+        """Reset the paper trading simulation (portfolio + history) and persist it."""
+        try:
+            initial_balance = self._portfolio.get_initial_balance()
+        except Exception:
+            initial_balance = Decimal("10000")
+
+        self._portfolio.reset(initial_balance)
+        self._save_portfolio()
+        if hasattr(self, "_trading_page"):
+            self._trading_page.refresh()
+        self.statusBar().showMessage("Paper Trading reset", 4000)
     
     def _on_settings_theme_changed(self, theme_mode: str) -> None:
         """Handle theme change from settings page."""
@@ -696,6 +713,37 @@ class MainWindow(QMainWindow):
             self._page_container.notify_width_changed(page_width)
     
     # ----- Lifecycle -----
+    def _shutdown(self) -> None:
+        if getattr(self, "_shutdown_started", False):
+            return
+        self._shutdown_started = True
+
+        self._save_portfolio()
+
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
+
+        try:
+            self._thread.quit()
+            self._thread.wait(2000)
+        except Exception:
+            pass
+
+        try:
+            self._provider._client.close()
+        except Exception:
+            pass
+
+        try:
+            self._ws.stop()
+        except Exception:
+            pass
+
+    def _on_about_to_quit(self) -> None:
+        self._shutdown()
+
     def closeEvent(self, event):  # type: ignore[override]
         if self._minimize_to_tray and QSystemTrayIcon.isSystemTrayAvailable():
             event.ignore()
@@ -704,18 +752,8 @@ class MainWindow(QMainWindow):
                 self.tray.showMessage("Crypto Ticker", "Still running in system tray", QSystemTrayIcon.Information, 4000)
                 self._tray_first_hide = False
             return
-        
-        # Save portfolio state before closing
-        self._save_portfolio()
-        
-        self._timer.stop()
-        self._thread.quit()
-        self._thread.wait(2000)
-        try:
-            self._provider._client.close()
-        except Exception:
-            pass
-        self._ws.stop()
+
+        self._shutdown()
         return super().closeEvent(event)
 def main() -> int:
     # Fix potential invalid SSL env vars and prefer OS trust store
@@ -725,6 +763,7 @@ def main() -> int:
         pass
     app = QApplication(sys.argv)
     w = MainWindow()
+    app.aboutToQuit.connect(w._on_about_to_quit)
     w.show()
     return app.exec()
 if __name__ == "__main__":

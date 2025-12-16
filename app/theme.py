@@ -266,6 +266,8 @@ def build_stylesheet(mode: str, accent: QColor, text_col: QColor | None = None) 
     return f"""
     QWidget {{ font-family: 'SF Pro Text', 'Segoe UI', 'Helvetica Neue', Arial; font-size: 11pt; color: {text}; }}
     QMainWindow {{ background-color: {bg}; }}
+    QDialog {{ background-color: {bg}; }}
+    QMessageBox {{ background-color: {panel}; }}
     QToolBar {{ background: {panel}; border: 0px; spacing: 8px; }}
     QLineEdit, QComboBox {{ color: {text}; background: {panel}; border: 1px solid #3a3a3a; padding: 6px; border-radius: 6px; }}
     QComboBox::drop-down {{ border: none; width: 20px; }}
