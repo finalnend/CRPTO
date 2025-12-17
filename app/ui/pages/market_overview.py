@@ -60,7 +60,6 @@ class MarketOverviewPage(QWidget):
         super().__init__(parent)
         
         self._symbols: List[str] = []
-        self._sparks: Dict[str, SparklineWidget] = {}
         self._price_history: Dict[str, deque] = {}
         self._selected_symbol: Optional[str] = None
         self._accent_color = QColor("#0A84FF")
@@ -136,6 +135,13 @@ class MarketOverviewPage(QWidget):
             symbols: List of trading pair symbols
         """
         self._symbols = symbols
+
+        # Drop cached history for removed symbols (widgets are owned by the table and
+        # can be deleted when the table is rebuilt/sorted).
+        keep = {s.upper() for s in symbols}
+        self._price_history = {k: v for k, v in self._price_history.items() if k.upper() in keep}
+        if self._selected_symbol and self._selected_symbol.upper() not in keep:
+            self._selected_symbol = None
         self._sync_table_rows()
     
     def _sync_table_rows(self) -> None:
@@ -151,7 +157,6 @@ class MarketOverviewPage(QWidget):
             # Sparkline widget
             sp = SparklineWidget(color=self._accent_color, left_padding=64)
             self._table.setCellWidget(row, 0, sp)
-            self._sparks[sym] = sp
             
             # Initialize price history
             if sym not in self._price_history:
@@ -184,9 +189,7 @@ class MarketOverviewPage(QWidget):
             low = float(d.get("low", 0.0))
             vol = float(d.get("volume", 0.0))
             qvol = float(d.get("quote_volume", 0.0))
-            ts = d.get("ts", datetime.now().strftime("%H:%M:%S"))
-            if isinstance(ts, str) and "T" in ts:
-                ts = datetime.fromisoformat(ts).strftime("%H:%M:%S")
+            ts = self._fmt_time(d.get("ts"))
             
             # Update table items
             self._set_numeric(row, 1, self._fmt_price(last), last)
@@ -209,10 +212,13 @@ class MarketOverviewPage(QWidget):
             self._price_history.setdefault(sym, deque(maxlen=100)).append((now_ms, last))
             
             # Update sparkline
-            sp = self._sparks.get(sym)
-            if sp:
-                hist = list(self._price_history.get(sym, []))[-50:]
-                sp.update_data([v for _, v in hist], color=self._accent_color)
+            sp = self._table.cellWidget(row, 0)
+            if isinstance(sp, SparklineWidget):
+                try:
+                    hist = list(self._price_history.get(sym, []))[-50:]
+                    sp.update_data([v for _, v in hist], color=self._accent_color)
+                except RuntimeError:
+                    pass
             
             # Update chart if this symbol is selected
             if sym == self._selected_symbol:
@@ -237,12 +243,18 @@ class MarketOverviewPage(QWidget):
     def _flash_cell(self, item: QTableWidgetItem, color: QColor, duration_ms: int = 200) -> None:
         """Flash a table cell background color briefly."""
         original_bg = item.background()
-        item.setBackground(color)
-        
-        timer = QTimer(self)
-        timer.setSingleShot(True)
-        timer.timeout.connect(lambda: item.setBackground(original_bg))
-        timer.start(duration_ms)
+        try:
+            item.setBackground(color)
+        except RuntimeError:
+            return
+
+        def _restore() -> None:
+            try:
+                item.setBackground(original_bg)
+            except RuntimeError:
+                pass
+
+        QTimer.singleShot(duration_ms, self, _restore)
     
     def _fmt_price(self, v: float) -> str:
         """Format a price value."""
@@ -260,6 +272,43 @@ class MarketOverviewPage(QWidget):
             v /= 1000.0
             i += 1
         return f"{v:.2f}{units[i]}"
+
+    def _fmt_time(self, ts) -> str:
+        """Format UNIX timestamp or ISO time to 24-hour time string."""
+        now_str = datetime.now().strftime("%H:%M:%S")
+        if ts is None:
+            return now_str
+
+        if isinstance(ts, (int, float)):
+            # Heuristic: milliseconds are ~1e12, seconds are ~1e9.
+            seconds = ts / 1000.0 if ts >= 10_000_000_000 else float(ts)
+            try:
+                return datetime.fromtimestamp(seconds).strftime("%H:%M:%S")
+            except Exception:
+                return now_str
+
+        if isinstance(ts, str):
+            s = ts.strip()
+            if not s:
+                return now_str
+            if s.isdigit():
+                try:
+                    v = int(s)
+                    seconds = v / 1000.0 if v >= 10_000_000_000 else float(v)
+                    return datetime.fromtimestamp(seconds).strftime("%H:%M:%S")
+                except Exception:
+                    return now_str
+            if "T" in s:
+                try:
+                    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                    if getattr(dt, "tzinfo", None) is not None:
+                        dt = dt.astimezone()
+                    return dt.strftime("%H:%M:%S")
+                except Exception:
+                    return now_str
+            return s
+
+        return now_str
     
     def _on_selection_changed(self) -> None:
         """Handle table selection change."""
@@ -318,8 +367,13 @@ class MarketOverviewPage(QWidget):
             color: The accent color to use
         """
         self._accent_color = color
-        for sp in self._sparks.values():
-            sp.update_color(color)
+        for row in range(self._table.rowCount()):
+            sp = self._table.cellWidget(row, 0)
+            if isinstance(sp, SparklineWidget):
+                try:
+                    sp.update_color(color)
+                except RuntimeError:
+                    pass
     
     def on_container_width_changed(self, width: int) -> None:
         """Handle container width changes for responsive layout.

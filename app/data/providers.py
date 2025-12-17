@@ -63,6 +63,45 @@ class BinanceRestProvider:
             raise last_err
         return out
 
+    def fetch_klines(self, symbol: str, interval: str = "1m", limit: int = 120) -> List[dict]:
+        sym = self._normalize_symbol(symbol)
+        with self._lock:
+            r = self._client.get(
+                "/api/v3/klines",
+                params={"symbol": sym, "interval": interval, "limit": int(limit)},
+            )
+        r.raise_for_status()
+        data = r.json()
+
+        out: List[dict] = []
+        for row in data or []:
+            try:
+                # https://binance-docs.github.io/apidocs/spot/en/#kline-candlestick-data
+                open_time = int(row[0])
+                open_ = float(row[1])
+                high = float(row[2])
+                low = float(row[3])
+                close = float(row[4])
+                volume = float(row[5])
+                quote_volume = float(row[7]) if len(row) > 7 else 0.0
+            except Exception:
+                continue
+            out.append(
+                {
+                    "symbol": sym,
+                    "i": interval,
+                    "t": open_time,
+                    "o": open_,
+                    "h": high,
+                    "l": low,
+                    "c": close,
+                    "v": volume,
+                    "q": quote_volume,
+                    "x": True,
+                }
+            )
+        return out
+
     def fetch_from(self, source: str, symbols: List[str]) -> Dict[str, Ticker]:
         source = source.lower()
         if source == "binance":

@@ -111,6 +111,8 @@ class ChartViewCrosshair(QChartView):
 class FetcherWorker(QObject):
     resultReady = Signal(dict)  # dict[symbol] = Ticker(dict)
     error = Signal(str)
+    klinesReady = Signal(str, str, list)  # symbol, interval, list[dict]
+    klineError = Signal(str)
     def __init__(self, provider: BinanceRestProvider) -> None:
         super().__init__()
         self._provider = provider
@@ -136,6 +138,14 @@ class FetcherWorker(QObject):
             self.resultReady.emit(packed)
         except Exception as e:
             self.error.emit(str(e))
+
+    @Slot(str, str, int)
+    def fetch_klines(self, symbol: str, interval: str, limit: int) -> None:
+        try:
+            data = self._provider.fetch_klines(symbol, interval=interval, limit=limit)
+            self.klinesReady.emit(symbol, interval, data)
+        except Exception as e:
+            self.klineError.emit(str(e))
 class NumericItem(QTableWidgetItem):
     def __init__(self, text: str = "", value: float = 0.0):
         super().__init__(text)
@@ -171,7 +181,7 @@ from app.ui.page_container import PageContainer
 from app.ui.pages.market_overview import MarketOverviewPage
 from app.ui.pages.paper_trading_page import PaperTradingFullPage
 from app.ui.pages.chart_analysis import ChartAnalysisPage
-from app.ui.pages.settings import SettingsPage
+from app.ui.pages.settings import SettingsPage, SYMBOLS_STORAGE_KEY, DEFAULT_TRACKED_SYMBOLS
 
 from decimal import Decimal
 from pathlib import Path
@@ -180,6 +190,7 @@ import logging
 logger = logging.getLogger(__name__)
 class MainWindow(QMainWindow):
     requestFetch = Signal(str, list)
+    requestKlines = Signal(str, str, int)
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Crypto Ticker - PySide6")
@@ -197,6 +208,11 @@ class MainWindow(QMainWindow):
         self._sparks: Dict[str, 'SparklineWidget'] = {}
         self.theme_mode = "dark"
         self.accent_color = QColor("#0A84FF")
+        # UI "TIMEFRAME" is treated as a lookback window (e.g. 4h = last 4 hours),
+        # while _kline_interval is the candle interval used for Binance kline streams.
+        self._kline_window: str = "1m"
+        self._kline_interval: str = "1m"
+        self._active_kline_symbol: str = ""
         
         # Price history for charts
         self.price_history: Dict[str, deque[tuple[float, float]]] = {}
@@ -221,11 +237,15 @@ class MainWindow(QMainWindow):
         
         # Wire signals
         self.requestFetch.connect(self._worker.fetch)
+        self.requestKlines.connect(self._worker.fetch_klines)
         self._worker.resultReady.connect(self._on_result)
         self._worker.error.connect(self._on_error)
+        self._worker.klinesReady.connect(self._on_klines_ready)
+        self._worker.klineError.connect(self._on_kline_error)
         
         # Paper trading setup (before UI so pages can use it)
         self._setup_paper_trading()
+        self.symbols = self._load_tracked_symbols()
         
         # UI - New navigation-based layout
         self._build_navigation_ui()
@@ -249,6 +269,10 @@ class MainWindow(QMainWindow):
 
         # Ensure state is persisted on app quit (e.g., tray "Quit")
         self._shutdown_started = False
+        self._portfolio_save_timer = QTimer(self)
+        self._portfolio_save_timer.setSingleShot(True)
+        self._portfolio_save_timer.setInterval(750)
+        self._portfolio_save_timer.timeout.connect(self._save_portfolio)
     # ----- UI Build -----
     def _build_navigation_ui(self) -> None:
         """Build the new navigation-based UI layout.
@@ -297,10 +321,12 @@ class MainWindow(QMainWindow):
             self._data_provider,
         )
         self._trading_page.resetRequested.connect(self._on_reset_paper_trading)
+        self._trading_page.orderSubmitted.connect(self._on_paper_trade_executed)
         
         # Chart Analysis Page (Requirements 4.1, 4.2, 4.3, 4.4)
         self._chart_page = ChartAnalysisPage()
         self._chart_page.symbolChanged.connect(self._on_chart_symbol_changed)
+        self._chart_page.timeframeChanged.connect(self._on_chart_timeframe_changed)
         
         # Settings Page (Requirements 5.1, 5.2, 5.3, 5.4, 5.5)
         self._settings_page = SettingsPage(storage=self._storage)
@@ -309,6 +335,9 @@ class MainWindow(QMainWindow):
         self._settings_page.accentColorChanged.connect(self._on_settings_accent_changed)
         self._settings_page.columnVisibilityChanged.connect(self._on_column_visibility_changed)
         self._settings_page.settingChanged.connect(self._on_setting_changed)
+        self._settings_page.symbolsChanged.connect(self._on_tracked_symbols_changed)
+        if hasattr(self._settings_page, "symbolsChanged"):
+            self._settings_page.symbolsChanged.connect(self._on_symbols_changed)
     
     def _register_pages(self) -> None:
         """Register all pages with the page container."""
@@ -322,6 +351,26 @@ class MainWindow(QMainWindow):
         # Set symbols for market overview and chart pages
         self._market_page.set_symbols(self.symbols)
         self._chart_page.set_symbols(self.symbols)
+        if hasattr(self, "_trading_page"):
+            prices = {}
+            if hasattr(self, "_data_provider") and hasattr(self._data_provider, "get_prices_snapshot"):
+                try:
+                    prices = self._data_provider.get_prices_snapshot()
+                except Exception:
+                    prices = {}
+            self._trading_page.set_symbols(self.symbols, prices)
+
+        # Initialize paper trading symbol dropdown
+        try:
+            prices = {}
+            for sym in self.symbols:
+                p = self._data_provider.get_current_price(sym)
+                if p is not None:
+                    prices[sym] = p
+            if hasattr(self, "_trading_page") and hasattr(self._trading_page, "_trading_panel"):
+                self._trading_page._trading_panel.update_symbol_list(self.symbols, prices)
+        except Exception:
+            pass
         
         # Set accent color
         self._market_page.set_accent_color(self.accent_color)
@@ -338,7 +387,32 @@ class MainWindow(QMainWindow):
     
     def _on_chart_symbol_changed(self, symbol: str) -> None:
         """Handle symbol change from chart analysis page."""
-        self._ensure_kline(symbol)
+        sym = self._normalize_symbol(symbol)
+        self._active_kline_symbol = sym
+        # Clear old candles immediately so we don't show stale data while backfilling/reconnecting.
+        if hasattr(self, "_chart_page"):
+            try:
+                self._chart_page.update_data([])
+            except Exception:
+                pass
+        self._ensure_kline(sym)
+
+    def _on_chart_timeframe_changed(self, timeframe: str) -> None:
+        """Handle timeframe change from chart analysis page."""
+        if timeframe and timeframe != self._kline_window:
+            self._kline_window = timeframe
+            # Pick a candle interval suitable for the selected lookback window.
+            self._kline_interval = self._choose_kline_interval(self._kline_window)
+            # Clear candle data immediately (ChartAnalysisPage will clear candle series when candle mode is active).
+            if hasattr(self, "_chart_page"):
+                try:
+                    self._chart_page.update_data([])
+                except Exception:
+                    pass
+            # Restart kline stream for active symbol.
+            sym = self._active_kline_symbol or (self._chart_page._symbol_combo.currentText() if hasattr(self, "_chart_page") else "")
+            if sym:
+                self._ensure_kline(sym)
     
     def _on_data_source_changed(self, source: str) -> None:
         """Handle data source change from settings page."""
@@ -352,6 +426,33 @@ class MainWindow(QMainWindow):
             self.rest_source = self.mode
             self.statusBar().showMessage(f"REST source: {self.rest_source}", 3000)
 
+    def _on_symbols_changed(self, symbols: List[str]) -> None:
+        symbols = self._sanitize_symbols(symbols)
+        if not symbols:
+            return
+
+        self.symbols = symbols
+
+        if hasattr(self, "_market_page"):
+            self._market_page.set_symbols(self.symbols)
+        if hasattr(self, "_chart_page"):
+            self._chart_page.set_symbols(self.symbols)
+
+        if self.mode in ("binance-ws", "auto"):
+            self._ws.start(self.symbols)
+
+        # Refresh paper trading symbol dropdown (prices are optional)
+        try:
+            prices = {}
+            for sym in self.symbols:
+                p = self._data_provider.get_current_price(sym)
+                if p is not None:
+                    prices[sym] = p
+            if hasattr(self, "_trading_page") and hasattr(self._trading_page, "_trading_panel"):
+                self._trading_page._trading_panel.update_symbol_list(self.symbols, prices)
+        except Exception:
+            pass
+
     def _on_reset_paper_trading(self) -> None:
         """Reset the paper trading simulation (portfolio + history) and persist it."""
         try:
@@ -364,6 +465,17 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_trading_page"):
             self._trading_page.refresh()
         self.statusBar().showMessage("Paper Trading reset", 4000)
+
+    @Slot(str, str, object, object)
+    def _on_paper_trade_executed(self, symbol: str, order_type: str, quantity, price) -> None:
+        # Debounced to avoid multiple disk writes if UI emits rapidly.
+        try:
+            self._portfolio_save_timer.start()
+        except Exception:
+            try:
+                self._save_portfolio()
+            except Exception:
+                pass
     
     def _on_settings_theme_changed(self, theme_mode: str) -> None:
         """Handle theme change from settings page."""
@@ -393,6 +505,43 @@ class MainWindow(QMainWindow):
         """Handle generic setting change from settings page."""
         if key == "minimize_to_tray":
             self._minimize_to_tray = value
+
+    def _on_tracked_symbols_changed(self, symbols: list) -> None:
+        """Apply tracked symbol changes from Settings page."""
+        cleaned: List[str] = []
+        for s in symbols:
+            if not isinstance(s, str):
+                continue
+            sym = self._normalize_symbol(s)
+            if sym and sym not in cleaned:
+                cleaned.append(sym)
+        if not cleaned:
+            cleaned = DEFAULT_TRACKED_SYMBOLS.copy()
+
+        self.symbols = cleaned
+
+        if hasattr(self, "_market_page"):
+            self._market_page.set_symbols(self.symbols)
+        if hasattr(self, "_chart_page"):
+            self._chart_page.set_symbols(self.symbols)
+        if hasattr(self, "_trading_page"):
+            prices = {}
+            if hasattr(self, "_data_provider") and hasattr(self._data_provider, "get_prices_snapshot"):
+                try:
+                    prices = self._data_provider.get_prices_snapshot()
+                except Exception:
+                    prices = {}
+            self._trading_page.set_symbols(self.symbols, prices)
+
+        if hasattr(self, "_ws"):
+            try:
+                self._ws.set_symbols(self.symbols)
+            except Exception:
+                # Fallback to full restart
+                try:
+                    self._ws.start(self.symbols)
+                except Exception:
+                    pass
     
     def _build_toolbar_min(self) -> None:
         # Keep toolbar minimal; main controls live in the sidebar.
@@ -403,6 +552,46 @@ class MainWindow(QMainWindow):
     # ----- Helpers -----
     def _normalize_symbol(self, s: str) -> str:
         return s.replace("/", "").replace("-", "").replace(" ", "").upper()
+
+    def _sanitize_symbols(self, symbols) -> List[str]:
+        if not isinstance(symbols, list):
+            return []
+        seen: set[str] = set()
+        out: List[str] = []
+        for x in symbols:
+            if not isinstance(x, str):
+                continue
+            sym = self._normalize_symbol(x.strip())
+            if sym and sym not in seen:
+                seen.add(sym)
+                out.append(sym)
+        return out
+
+    def _load_tracked_symbols(self) -> List[str]:
+        """Load tracked symbols from storage (fallback to current defaults)."""
+        storage = getattr(self, "_storage", None)
+        if storage is None:
+            cleaned = self._sanitize_symbols(getattr(self, "symbols", None))
+            return cleaned or DEFAULT_TRACKED_SYMBOLS.copy()
+
+        try:
+            data = storage.load(SYMBOLS_STORAGE_KEY)
+        except Exception:
+            data = None
+
+        loaded = self._sanitize_symbols(data)
+        if loaded:
+            self.symbols = loaded
+            return self.symbols
+
+        # Persist current defaults if nothing stored yet
+        cleaned_defaults = self._sanitize_symbols(getattr(self, "symbols", None))
+        self.symbols = cleaned_defaults or DEFAULT_TRACKED_SYMBOLS.copy()
+        try:
+            storage.save(SYMBOLS_STORAGE_KEY, self.symbols)
+        except Exception:
+            pass
+        return self.symbols
     def _tick(self) -> None:
         # Poll only in REST modes; in auto only when WS not connected
         should_poll = (self.mode in ("binance", "coingecko", "coinbase")) or (
@@ -421,7 +610,14 @@ class MainWindow(QMainWindow):
         # Update chart analysis page with price points
         for sym, d in packed.items():
             last = float(d.get("last", 0.0))
-            
+
+            # Keep paper trading price cache in sync even in REST modes.
+            if hasattr(self, "_data_provider"):
+                try:
+                    self._data_provider.update_price(sym, last)
+                except Exception:
+                    pass
+             
             # Push to price history
             self._push_price(sym, last)
             
@@ -560,6 +756,7 @@ class MainWindow(QMainWindow):
         # Initialize storage service
         storage_path = Path.home() / ".crypto_ticker" / "data"
         self._storage = JsonFileStorage(storage_path)
+        self._load_tracked_symbols()
         
         # Initialize data provider adapter
         self._data_provider = BinanceDataProviderAdapter()
@@ -633,33 +830,175 @@ class MainWindow(QMainWindow):
             self.price_history[sym] = dq
         ms = int(datetime.now().timestamp() * 1000)
         dq.append((ms, price))
+
+    def _window_to_ms(self, window: str) -> int:
+        tf = (window or "").strip().lower()
+        if not tf:
+            return 0
+        try:
+            n = int(tf[:-1])
+        except Exception:
+            return 0
+        unit = tf[-1]
+        if unit == "m":
+            return n * 60 * 1000
+        if unit == "h":
+            return n * 60 * 60 * 1000
+        if unit == "d":
+            return n * 24 * 60 * 60 * 1000
+        return 0
+
+    def _interval_to_ms(self, interval: str) -> int:
+        return self._window_to_ms(interval)
+
+    def _choose_kline_interval(self, window: str) -> str:
+        w_ms = self._window_to_ms(window)
+        if w_ms <= 0:
+            return "1m"
+        if w_ms <= 4 * 60 * 60 * 1000:
+            return "1m"
+        if w_ms <= 24 * 60 * 60 * 1000:
+            return "5m"
+        return "15m"
+
+    def _choose_kline_limit(self, window: str, interval: str, max_limit: int = 120) -> int:
+        w_ms = self._window_to_ms(window)
+        i_ms = self._interval_to_ms(interval) or 60 * 1000
+        if w_ms <= 0:
+            return max_limit
+        need = int((w_ms + i_ms - 1) // i_ms) + 2  # small buffer
+        return max(3, min(max_limit, need))
+
     def _ensure_kline(self, sym: str) -> None:
         # Start kline stream for selected symbol
-        self._kws.start(sym, "1m")
         if not hasattr(self, "ohlc_history"):
-            self.ohlc_history: Dict[str, List[dict]] = {}
+            self.ohlc_history: Dict[tuple[str, str], List[dict]] = {}
+        sym = self._normalize_symbol(sym)
+        interval = self._kline_interval or "1m"
+        self._active_kline_symbol = sym
+
+        key = (sym, interval)
+        arr = self.ohlc_history.get(key)
+        if arr:
+            # Warm-start the chart from cached history.
+            if hasattr(self, "_chart_page") and sym == self._active_kline_symbol and interval == self._kline_interval:
+                kline_data = [
+                    {
+                        "timestamp": k["t"],
+                        "open": k["o"],
+                        "high": k["h"],
+                        "low": k["l"],
+                        "close": k["c"],
+                        "volume": k.get("q", 0.0),
+                    }
+                    for k in arr
+                ]
+                try:
+                    self._chart_page.update_data(kline_data)
+                except Exception:
+                    pass
+        else:
+            # Ensure the key exists so WS updates can append/replace immediately.
+            self.ohlc_history[key] = []
+
+        # Backfill recent candles asynchronously (avoids "timeframe does nothing" / empty chart on first select).
+        try:
+            limit = self._choose_kline_limit(self._kline_window, interval, max_limit=500)
+            self.requestKlines.emit(sym, interval, limit)
+        except Exception:
+            pass
+
+        self._kws.start(sym, interval)
+
+    @Slot(str, str, list)
+    def _on_klines_ready(self, symbol: str, interval: str, data: list) -> None:
+        sym = self._normalize_symbol(symbol)
+        if not hasattr(self, "ohlc_history"):
+            self.ohlc_history = {}
+        key = (sym, interval)
+
+        # Normalize/merge/trim to keep memory bounded and match WS format.
+        merged_by_t: Dict[int, dict] = {}
+        existing = self.ohlc_history.get(key) or []
+        for d in existing:
+            if not isinstance(d, dict):
+                continue
+            try:
+                t = int(d.get("t", 0))
+            except Exception:
+                continue
+            if t > 0:
+                merged_by_t[t] = d
+
+        for d in data or []:
+            if not isinstance(d, dict):
+                continue
+            try:
+                t = int(d.get("t", 0))
+            except Exception:
+                continue
+            if t <= 0:
+                continue
+            merged_by_t[t] = d
+
+        arr = [merged_by_t[t] for t in sorted(merged_by_t.keys())]
+        keep = self._choose_kline_limit(self._kline_window, interval, max_limit=500)
+        if len(arr) > keep:
+            arr = arr[-keep:]
+        self.ohlc_history[key] = arr
+
+        if not hasattr(self, "_chart_page"):
+            return
+        if sym != self._active_kline_symbol or interval != self._kline_interval:
+            return
+
+        kline_data = [
+            {
+                "timestamp": k["t"],
+                "open": k["o"],
+                "high": k["h"],
+                "low": k["l"],
+                "close": k["c"],
+                "volume": k.get("q", 0.0),
+            }
+            for k in arr
+        ]
+        try:
+            self._chart_page.update_data(kline_data)
+        except Exception:
+            pass
+
+    @Slot(str)
+    def _on_kline_error(self, msg: str) -> None:
+        # Do not participate in REST failover logic; this is an optional backfill.
+        self.statusBar().showMessage(f"Kline backfill error: {msg}", 5000)
     @Slot(dict)
     def _on_kline(self, d: dict) -> None:
         """Handle kline data from WebSocket."""
         sym = d.get("symbol", "")
+        interval = d.get("i") or self._kline_interval
+        if sym and not self._active_kline_symbol:
+            self._active_kline_symbol = sym
         if not hasattr(self, "ohlc_history"):
-            self.ohlc_history: Dict[str, List[dict]] = {}
+            self.ohlc_history: Dict[tuple[str, str], List[dict]] = {}
         
-        arr = self.ohlc_history.get(sym)
+        key = (sym, interval)
+        arr = self.ohlc_history.get(key)
         if arr is None:
             arr = []
-            self.ohlc_history[sym] = arr
+            self.ohlc_history[key] = arr
         
         # Maintain up to 120 candles
         if arr and arr[-1].get("t") == d["t"]:
             arr[-1] = d
         else:
             arr.append(d)
-            if len(arr) > 120:
-                del arr[0: len(arr) - 120]
+            keep = self._choose_kline_limit(self._kline_window, interval, max_limit=500)
+            if len(arr) > keep:
+                del arr[0: len(arr) - keep]
         
         # Update chart analysis page with kline data
-        if hasattr(self, '_chart_page'):
+        if hasattr(self, '_chart_page') and sym == self._active_kline_symbol and interval == self._kline_interval:
             kline_data = [
                 {
                     "timestamp": k["t"],

@@ -23,6 +23,10 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QFrame,
     QColorDialog,
+    QListWidget,
+    QAbstractItemView,
+    QInputDialog,
+    QMessageBox,
 )
 
 from app.storage.storage import IStorageService
@@ -61,6 +65,8 @@ class AppSettings:
 
 
 SETTINGS_STORAGE_KEY = "app_settings"
+SYMBOLS_STORAGE_KEY = "tracked_symbols"
+DEFAULT_TRACKED_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
 
 # Column names for visibility toggles
 COLUMN_NAMES = [
@@ -97,6 +103,7 @@ class SettingsPage(QWidget):
     accentColorChanged = Signal(QColor)
     dataSourceChanged = Signal(str)
     columnVisibilityChanged = Signal(str, bool)  # column_name, visible
+    symbolsChanged = Signal(list)  # List[str]
     
     def __init__(
         self,
@@ -114,8 +121,10 @@ class SettingsPage(QWidget):
         self._storage = storage
         self._settings = AppSettings()
         self._column_checkboxes: dict[str, QCheckBox] = {}
+        self._tracked_symbols: List[str] = []
         
         self._load_settings()
+        self._load_tracked_symbols()
         self._setup_ui()
         self._apply_settings_to_ui()
     
@@ -144,6 +153,10 @@ class SettingsPage(QWidget):
         # Data Source section
         data_source_group = self._create_data_source_section()
         scroll_layout.addWidget(data_source_group)
+
+        # Tracked symbols section
+        symbols_group = self._create_symbols_section()
+        scroll_layout.addWidget(symbols_group)
         
         # Appearance section
         appearance_group = self._create_appearance_section()
@@ -183,6 +196,36 @@ class SettingsPage(QWidget):
         
         layout.addLayout(source_layout)
         
+        return group
+
+    def _create_symbols_section(self) -> QGroupBox:
+        """Create the tracked symbols section."""
+        group = QGroupBox("Tracked Symbols")
+        layout = QVBoxLayout(group)
+
+        desc = QLabel("Add/remove symbols shown in Market Overview and Chart (e.g., BTCUSDT).")
+        desc.setStyleSheet("color: #888;")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        self._symbols_list = QListWidget()
+        self._symbols_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        layout.addWidget(self._symbols_list)
+
+        btn_layout = QHBoxLayout()
+
+        add_btn = QPushButton("Add...")
+        add_btn.clicked.connect(self._on_add_symbol)
+        btn_layout.addWidget(add_btn)
+
+        remove_btn = QPushButton("Remove")
+        remove_btn.clicked.connect(self._on_remove_selected_symbols)
+        btn_layout.addWidget(remove_btn)
+
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
+        self._refresh_symbols_list()
         return group
     
     def _create_appearance_section(self) -> QGroupBox:
@@ -362,7 +405,83 @@ class SettingsPage(QWidget):
             data = self._storage.load(SETTINGS_STORAGE_KEY)
             if data:
                 self._settings = AppSettings.from_dict(data)
-    
+
+    def _normalize_symbol(self, s: str) -> str:
+        return s.replace("/", "").replace("-", "").replace(" ", "").upper()
+
+    def _load_tracked_symbols(self) -> None:
+        """Load tracked symbols from storage."""
+        symbols: List[str] = []
+        if self._storage:
+            data = self._storage.load(SYMBOLS_STORAGE_KEY)
+            if isinstance(data, list):
+                symbols = [self._normalize_symbol(x) for x in data if isinstance(x, str)]
+
+        if not symbols:
+            symbols = DEFAULT_TRACKED_SYMBOLS.copy()
+            if self._storage:
+                self._storage.save(SYMBOLS_STORAGE_KEY, symbols)
+
+        # De-dupe while preserving order
+        seen: set[str] = set()
+        cleaned: List[str] = []
+        for sym in symbols:
+            if sym and sym not in seen:
+                seen.add(sym)
+                cleaned.append(sym)
+        self._tracked_symbols = cleaned
+
+    def _save_tracked_symbols(self) -> None:
+        if self._storage:
+            self._storage.save(SYMBOLS_STORAGE_KEY, self._tracked_symbols)
+
+    def _refresh_symbols_list(self) -> None:
+        if not hasattr(self, "_symbols_list"):
+            return
+        self._symbols_list.clear()
+        for sym in self._tracked_symbols:
+            self._symbols_list.addItem(sym)
+
+    def _emit_symbols_changed(self) -> None:
+        self.symbolsChanged.emit(self._tracked_symbols.copy())
+
+    def _on_add_symbol(self) -> None:
+        """Add a symbol to the tracked list."""
+        text, ok = QInputDialog.getText(self, "Add Symbol", "Symbol (e.g., BTCUSDT):")
+        if not ok:
+            return
+
+        sym = self._normalize_symbol(text.strip())
+        if not sym:
+            return
+
+        if sym in self._tracked_symbols:
+            return
+
+        self._tracked_symbols.append(sym)
+        self._save_tracked_symbols()
+        self._refresh_symbols_list()
+        self._emit_symbols_changed()
+
+    def _on_remove_selected_symbols(self) -> None:
+        """Remove selected symbols from the tracked list."""
+        if not hasattr(self, "_symbols_list"):
+            return
+
+        selected = [i.text() for i in self._symbols_list.selectedItems()]
+        if not selected:
+            return
+
+        remaining = [s for s in self._tracked_symbols if s not in set(selected)]
+        if not remaining:
+            QMessageBox.warning(self, "Tracked Symbols", "At least one symbol must remain.")
+            return
+
+        self._tracked_symbols = remaining
+        self._save_tracked_symbols()
+        self._refresh_symbols_list()
+        self._emit_symbols_changed()
+
     def _save_settings(self) -> None:
         """Save settings to storage."""
         if self._storage:
@@ -408,7 +527,9 @@ class SettingsPage(QWidget):
         """
         self._storage = storage
         self._load_settings()
+        self._load_tracked_symbols()
         self._apply_settings_to_ui()
+        self._refresh_symbols_list()
     
     def on_container_width_changed(self, width: int) -> None:
         """Handle container width changes for responsive layout.

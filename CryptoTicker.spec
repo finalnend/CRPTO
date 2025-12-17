@@ -6,6 +6,8 @@ binaries = []
 hiddenimports = ['truststore', 'PySide6.QtCharts', 'PySide6.QtWebSockets']
 tmp_ret = collect_all('PySide6')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('shiboken6')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('certifi')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
@@ -18,7 +20,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['scripts\\pyi_rth_dll_search_path.py'],
     excludes=[],
     noarchive=False,
     optimize=0,

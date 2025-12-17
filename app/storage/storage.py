@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from abc import ABC, abstractmethod
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -94,12 +95,21 @@ class JsonFileStorage(IStorageService):
             OSError: If file cannot be written
         """
         file_path = self._get_file_path(key)
+        tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
         try:
-            with file_path.open("w", encoding="utf-8") as f:
+            with tmp_path.open("w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+            # Atomic replace prevents partially-written/corrupted JSON on crash.
+            tmp_path.replace(file_path)
         except (TypeError, OSError) as e:
             logger.error(f"Failed to save data for key '{key}': {e}")
             raise
+        finally:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
 
     def load(self, key: str) -> Optional[Any]:
         """Load data from a JSON file.
@@ -119,6 +129,13 @@ class JsonFileStorage(IStorageService):
                 return json.load(f)
         except json.JSONDecodeError as e:
             logger.error(f"Corrupted data for key '{key}': {e}")
+            # Preserve corrupted file for debugging instead of repeatedly failing to load.
+            try:
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                bad_path = file_path.with_suffix(file_path.suffix + f".corrupt-{stamp}")
+                file_path.replace(bad_path)
+            except Exception:
+                pass
             return None
         except OSError as e:
             logger.error(f"Failed to load data for key '{key}': {e}")

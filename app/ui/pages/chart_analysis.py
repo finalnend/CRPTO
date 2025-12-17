@@ -6,10 +6,9 @@ Full-page chart analysis interface with toolbar controls.
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QDateTime
 from PySide6.QtGui import QColor, QPen, QBrush, QLinearGradient, QPainter
 from PySide6.QtWidgets import (
     QWidget,
@@ -47,6 +46,7 @@ class ChartAnalysisPage(QWidget):
     
     symbolChanged = Signal(str)
     timeframeChanged = Signal(str)
+    chartModeChanged = Signal(str)  # "line" or "candle"
     
     TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"]
     
@@ -55,6 +55,7 @@ class ChartAnalysisPage(QWidget):
         
         self._current_symbol: str = ""
         self._current_timeframe: str = "1m"
+        self._narrow_mode: bool = False
         self._symbols: List[str] = []
         self._price_history: Dict[str, deque] = {}
         self._kline_data: List[dict] = []
@@ -135,7 +136,132 @@ class ChartAnalysisPage(QWidget):
         
         # Apply initial styling
         self._apply_chart_style()
-    
+        self._update_axis_format()
+
+    def _pick_datetime_format(self) -> str:
+        tf = (self._current_timeframe or "").lower()
+        if tf.endswith("d"):
+            # 1d is treated as "last 1 day" lookback window; include time to avoid looking like daily candles.
+            return "MM-dd" if self._narrow_mode else "MM-dd HH:mm"
+        if tf.endswith("h"):
+            return "MM-dd HH:mm"
+        if tf == "1m":
+            return "HH:mm" if self._narrow_mode else "HH:mm:ss"
+        return "HH:mm"
+
+    def _pick_tick_count(self) -> int:
+        # Default tick count (Qt default is 5 which can make intraday charts look like "days").
+        if self._narrow_mode:
+            return 5
+        tf = (self._current_timeframe or "").lower()
+        if tf.endswith("d"):
+            return 7
+        if tf.endswith("h"):
+            return 7
+        return 7
+
+    def _update_axis_format(self) -> None:
+        try:
+            if self._chart_mode == "line":
+                self._axis_x.setFormat("HH:mm" if self._narrow_mode else "HH:mm:ss")
+            else:
+                self._axis_x.setFormat(self._pick_datetime_format())
+            self._axis_x.setTickCount(self._pick_tick_count())
+        except Exception:
+            pass
+
+    def _qt_dt(self, ms: float) -> QDateTime:
+        return QDateTime.fromMSecsSinceEpoch(int(ms))
+
+    def _timeframe_to_ms(self, timeframe: str) -> int:
+        tf = (timeframe or "").strip().lower()
+        if not tf:
+            return 0
+        try:
+            n = int(tf[:-1])
+        except Exception:
+            return 0
+        unit = tf[-1]
+        if unit == "m":
+            return n * 60 * 1000
+        if unit == "h":
+            return n * 60 * 60 * 1000
+        if unit == "d":
+            return n * 24 * 60 * 60 * 1000
+        return 0
+
+    def _latest_tick(self) -> tuple[float, float] | None:
+        history = self._price_history.get(self._current_symbol)
+        if not history:
+            return None
+        try:
+            ms, price = history[-1]
+            return float(ms), float(price)
+        except Exception:
+            return None
+
+    def _range_end_ms(self) -> float | None:
+        last_tick = self._latest_tick()
+        if last_tick is not None:
+            return float(last_tick[0])
+        if not self._kline_data:
+            return None
+        max_t = 0
+        for k in self._kline_data:
+            try:
+                max_t = max(max_t, int(k.get("timestamp", 0)))
+            except Exception:
+                continue
+        if max_t <= 0:
+            return None
+        step = self._estimate_step_ms(self._kline_data) or 0
+        return float(max_t + step)
+
+    def _filter_by_window(self, points: List[dict]) -> List[dict]:
+        if not points:
+            return []
+        window_ms = self._timeframe_to_ms(self._current_timeframe)
+        if window_ms <= 0:
+            return points
+        max_t = 0
+        for p in points:
+            try:
+                max_t = max(max_t, int(p.get("timestamp", 0)))
+            except Exception:
+                continue
+        if max_t <= 0:
+            return points
+        start_t = max_t - window_ms
+        out: List[dict] = []
+        for p in points:
+            try:
+                if int(p.get("timestamp", 0)) >= start_t:
+                    out.append(p)
+            except Exception:
+                continue
+        return out
+
+    def _estimate_step_ms(self, points: List[dict]) -> int:
+        if len(points) < 2:
+            return 0
+        prev: int | None = None
+        best: int | None = None
+        for p in points:
+            try:
+                t = int(p.get("timestamp", 0))
+            except Exception:
+                continue
+            if prev is None:
+                prev = t
+                continue
+            diff = t - prev
+            prev = t
+            if diff <= 0:
+                continue
+            if best is None or diff < best:
+                best = diff
+        return int(best or 0)
+
     def _create_toolbar(self) -> QToolBar:
         """Create the chart toolbar."""
         toolbar = QToolBar()
@@ -242,6 +368,10 @@ class ChartAnalysisPage(QWidget):
         """Handle timeframe selection change."""
         if timeframe != self._current_timeframe:
             self._current_timeframe = timeframe
+            # Avoid briefly showing stale candle data until the new interval arrives.
+            if self._chart_mode == "candle":
+                self._kline_data = []
+            self._update_axis_format()
             self._update_chart()
             self.timeframeChanged.emit(timeframe)
     
@@ -249,15 +379,39 @@ class ChartAnalysisPage(QWidget):
         """Handle chart type change."""
         is_candle = chart_type == "Candle"
         self._chart_mode = "candle" if is_candle else "line"
-        
-        # Toggle series visibility
-        self._candle_series.setVisible(is_candle)
+
+        # TIMEFRAME only applies to candlestick (kline) view; line is a realtime tick chart.
+        try:
+            self._timeframe_combo.setEnabled(is_candle)
+        except Exception:
+            pass
+
+        # Some QtChart builds may leave stale candlestick graphics around when merely
+        # toggling visibility; remove/add the series to guarantee correct redraw.
+        if is_candle:
+            if self._candle_series not in self._chart.series():
+                self._chart.addSeries(self._candle_series)
+                self._candle_series.attachAxis(self._axis_x)
+                self._candle_series.attachAxis(self._axis_y)
+            self._candle_series.setVisible(True)
+        else:
+            # Clear candlestick data and remove series to avoid residual UI artifacts.
+            try:
+                self._candle_series.clear()
+            except Exception:
+                pass
+            if self._candle_series in self._chart.series():
+                self._chart.removeSeries(self._candle_series)
+
+        # Toggle line series visibility
         self._series_main.setVisible(not is_candle)
         self._series_ma_fast.setVisible(not is_candle)
         self._series_ma_slow.setVisible(not is_candle)
         self._area_fill.setVisible(not is_candle)
-        
+
+        self._update_axis_format()
         self._update_chart()
+        self.chartModeChanged.emit(self._chart_mode)
     
     def _reset_zoom(self) -> None:
         """Reset chart zoom."""
@@ -338,60 +492,66 @@ class ChartAnalysisPage(QWidget):
         """Update the chart display."""
         if not self._current_symbol:
             return
+
+        if self._chart_mode == "candle":
+            self._chart.setTitle(f"{self._current_symbol} - {self._current_timeframe}")
+        else:
+            self._chart.setTitle(f"{self._current_symbol} - Realtime")
         
-        self._chart.setTitle(f"{self._current_symbol} - {self._current_timeframe}")
-        
-        if self._chart_mode == "candle" and self._kline_data:
+        if self._chart_mode == "candle":
             self._update_candle_chart()
         else:
             self._update_line_chart()
     
     def _update_line_chart(self) -> None:
-        """Update the line chart with price history."""
-        history = self._price_history.get(self._current_symbol, deque())
-        
+        """Update the line chart with realtime tick history (TIMEFRAME ignored)."""
         self._series_main.clear()
         self._series_ma_fast.clear()
         self._series_ma_slow.clear()
-        
+
+        history = self._price_history.get(self._current_symbol, deque())
         if not history:
             return
-        
-        prices = []
-        min_price = float('inf')
-        max_price = float('-inf')
-        min_time = float('inf')
-        max_time = float('-inf')
-        
+
+        times: List[float] = []
+        prices: List[float] = []
+        min_price = float("inf")
+        max_price = float("-inf")
+        min_time = float("inf")
+        max_time = float("-inf")
+
         for ms, price in history:
+            ms = float(ms)
+            price = float(price)
             self._series_main.append(ms, price)
+            times.append(ms)
             prices.append(price)
             min_price = min(min_price, price)
             max_price = max(max_price, price)
             min_time = min(min_time, ms)
             max_time = max(max_time, ms)
+
+        if not prices:
+            return
         
         # Calculate moving averages
         if len(prices) >= 7:
             for i in range(6, len(prices)):
                 ma7 = sum(prices[i-6:i+1]) / 7
-                ms = list(history)[i][0]
+                ms = times[i]
                 self._series_ma_fast.append(ms, ma7)
         
         if len(prices) >= 25:
             for i in range(24, len(prices)):
                 ma25 = sum(prices[i-24:i+1]) / 25
-                ms = list(history)[i][0]
+                ms = times[i]
                 self._series_ma_slow.append(ms, ma25)
         
         # Update axes
         if min_price != float('inf'):
             margin = (max_price - min_price) * 0.1 or 1.0
             self._axis_y.setRange(min_price - margin, max_price + margin)
-            self._axis_x.setRange(
-                datetime.fromtimestamp(min_time / 1000),
-                datetime.fromtimestamp(max_time / 1000)
-            )
+            self._axis_x.setRange(self._qt_dt(min_time), self._qt_dt(max_time))
     
     def _update_candle_chart(self) -> None:
         """Update the candlestick chart."""
@@ -399,13 +559,37 @@ class ChartAnalysisPage(QWidget):
         
         if not self._kline_data:
             return
+
+        window_ms = self._timeframe_to_ms(self._current_timeframe)
+        max_time = 0
+        for k in self._kline_data:
+            try:
+                max_time = max(max_time, int(k.get("timestamp", 0)))
+            except Exception:
+                continue
+        if max_time <= 0:
+            return
+        step_ms = self._estimate_step_ms(self._kline_data) or self._timeframe_to_ms("1m")
+        end_ms = max_time + step_ms
+        start_ms = end_ms - window_ms if window_ms > 0 else 0
+        filtered = []
+        for k in self._kline_data:
+            try:
+                ts = int(k.get("timestamp", 0))
+            except Exception:
+                continue
+            if window_ms > 0 and ts < start_ms:
+                continue
+            filtered.append(k)
+        if not filtered:
+            return
         
         min_price = float('inf')
         max_price = float('-inf')
         min_time = float('inf')
-        max_time = float('-inf')
+        max_time_f = float('-inf')
         
-        for kline in self._kline_data:
+        for kline in filtered:
             ts = kline.get("timestamp", 0)
             o = kline.get("open", 0)
             h = kline.get("high", 0)
@@ -418,16 +602,17 @@ class ChartAnalysisPage(QWidget):
             min_price = min(min_price, l)
             max_price = max(max_price, h)
             min_time = min(min_time, ts)
-            max_time = max(max_time, ts)
+            max_time_f = max(max_time_f, ts)
         
         # Update axes
         if min_price != float('inf'):
             margin = (max_price - min_price) * 0.1 or 1.0
             self._axis_y.setRange(min_price - margin, max_price + margin)
-            self._axis_x.setRange(
-                datetime.fromtimestamp(min_time / 1000),
-                datetime.fromtimestamp(max_time / 1000)
-            )
+            if window_ms > 0:
+                start_range = max_time_f - window_ms
+                self._axis_x.setRange(self._qt_dt(start_range), self._qt_dt(end_ms))
+            else:
+                self._axis_x.setRange(self._qt_dt(min_time), self._qt_dt(end_ms))
     
     def set_accent_color(self, color: QColor) -> None:
         """Set the accent color for the chart.
@@ -448,14 +633,13 @@ class ChartAnalysisPage(QWidget):
         """
         # Adjust toolbar layout based on width
         # In narrow mode, hide some labels to save space
-        narrow_mode = width < 600
+        self._narrow_mode = width < 600
+        self._update_axis_format()
         
         # Adjust axis format based on width
-        if narrow_mode:
-            self._axis_x.setFormat("HH:mm")
+        if self._narrow_mode:
             self._axis_x.setTitleVisible(False)
             self._axis_y.setTitleVisible(False)
         else:
-            self._axis_x.setFormat("HH:mm:ss")
             self._axis_x.setTitleVisible(True)
             self._axis_y.setTitleVisible(True)

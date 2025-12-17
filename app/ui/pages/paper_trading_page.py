@@ -7,7 +7,7 @@ Implements Requirements 3.1, 3.2, 3.3, 3.4.
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Dict, List
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
@@ -228,6 +228,12 @@ class PaperTradingFullPage(QWidget):
         """
         self._trading_panel.set_symbol(symbol)
         self._update_price_display(symbol)
+
+    def set_symbols(self, symbols: List[str], prices: Optional[Dict[str, Decimal]] = None) -> None:
+        """Set available symbols for the symbol dropdown."""
+        if prices is None:
+            prices = {}
+        self._trading_panel.update_symbol_list(symbols, prices)
     
     def _update_price_display(self, symbol: str) -> None:
         """Update the real-time price display for a symbol."""

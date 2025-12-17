@@ -273,3 +273,7 @@ class BinanceDataProviderAdapter(IDataProvider):
             True if connected and receiving data
         """
         return self._connected
+
+    def get_prices_snapshot(self) -> dict[str, Decimal]:
+        """Get a shallow copy of the current price cache."""
+        return dict(self._prices)

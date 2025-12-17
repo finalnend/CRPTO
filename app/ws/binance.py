@@ -109,6 +109,7 @@ class BinanceKlineWsClient(QObject):
             k = o.get("k") or {}
             d = {
                 "symbol": (o.get("s") or k.get("s") or "").upper(),
+                "i": k.get("i") or "",
                 "t": int(k.get("t", 0)),
                 "o": float(k.get("o", 0.0)),
                 "h": float(k.get("h", 0.0)),
